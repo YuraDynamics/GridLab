@@ -22,8 +22,8 @@
     --mono: 'JetBrains Mono','IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;
   }
   body.light{
-    --bg:#eef1f4; --panel:#ffffff; --panel-2:#f5f7f9; --line:#d7dde3; --line-soft:#e7ebef;
-    --text:#2a3542; --text-dim:#8a97a5; --text-bright:#10151b; --stage-bg:#ffffff;
+    --bg:#ffffff; --panel:#ffffff; --panel-2:#f4f4f4; --line:#cfcfcf; --line-soft:#e9e9e9;
+    --text:#0d0d0d; --text-dim:#4a4a4a; --text-bright:#000000; --stage-bg:#ffffff;
   }
   *{box-sizing:border-box;}
   html,body{height:100%;}
@@ -234,6 +234,23 @@
     <div id="addGridList"></div>
     <div class="section-label">Reference</div>
     <div class="lib-card" id="libCard"></div>
+    <div class="section-label">Reference Image</div>
+    <div class="lib-card" style="margin-top:0;">
+      <p style="margin:0 0 8px;">Upload a picture to see where your content should go, so you know exactly where to place it against the grid.</p>
+      <input type="file" id="refImgInput" accept="image/*" style="width:100%;margin-bottom:8px;font-size:10.5px;">
+      <div class="field" id="refOpacityField" style="display:none;">
+        <label>OPACITY</label>
+        <div class="row">
+          <input type="range" id="refOpacity" min="5" max="100" value="60">
+          <span class="val" id="refOpacityVal">60%</span>
+        </div>
+      </div>
+      <div style="display:none; gap:8px; align-items:center; margin-top:6px;" id="refControlsRow">
+        <button class="tbtn" id="refIncludeBtn" style="flex:1;">EXCLUDE FROM EXPORT</button>
+        <button class="tbtn" id="refRemoveBtn">✕</button>
+      </div>
+      <div class="hint">Reference images are never included in PNG/PDF exports unless you turn that on above — the point is to trace against it, not bake it in.</div>
+    </div>
   </div>
 
   <!-- CENTER: CANVAS -->
@@ -249,10 +266,19 @@
         </select>
       </div>
       <div class="grp" id="customDimGrp" style="display:none;">
-        <input type="number" id="customW" value="1200" min="50" max="4000" style="width:74px;">
-        <span style="color:var(--text-dim);">×</span>
-        <input type="number" id="customH" value="800" min="50" max="4000" style="width:74px;">
+        <input type="number" id="customW" value="1200" min="0.01" step="any" style="width:70px;">
+        <button class="tbtn" id="customLock" title="Lock aspect ratio">🔓</button>
+        <input type="number" id="customH" value="800" min="0.01" step="any" style="width:70px;">
+        <select id="customUnit" style="width:64px;">
+          <option value="px" selected>px</option>
+          <option value="in">in</option>
+          <option value="cm">cm</option>
+          <option value="mm">mm</option>
+          <option value="m">m</option>
+          <option value="ft">ft</option>
+        </select>
         <button class="tbtn" id="customApply">SET</button>
+        <span class="hint" id="customPxHint" style="margin:0;"></span>
       </div>
       <div class="grp">
         <label>UNIT</label>
@@ -451,11 +477,24 @@ const GridEngine = {
   isometric(w,h,p){
     const s=p.spacing||40;
     const lines=[]; const tan30=Math.tan(Math.PI/6);
-    for(let x=-h;x<w+h;x+=s){
+    // All three line families now share the same period `s`, which is what
+    // makes them form a true equilateral triangular lattice (the previous
+    // version spaced the verticals differently from the diagonals, so the
+    // triangles were never actually equilateral — that was the reported bug).
+    for(let x=-h*tan30-s; x<w+h*tan30+s; x+=s){
       lines.push({x1:x,y1:0,x2:x+h*tan30,y2:h,color:'primary'});
       lines.push({x1:x,y1:0,x2:x-h*tan30,y2:h,color:'secondary'});
     }
-    for(let y=0;y<=h;y+=s*tan30) lines.push({x1:0,y1:y,x2:w,y2:y,color:'accent',faint:true});
+    for(let x=0;x<=w;x+=s){
+      lines.push({x1:x,y1:0,x2:x,y2:h,color:'accent',faint:true});
+    }
+    if(p.hexOverlay){
+      // A triangular lattice with edge length `s` has an exactly matching
+      // hex tiling (each hexagon = 6 triangles) using the same size `s` —
+      // reuse the hexagonal() geometry directly so the two stay locked together.
+      const hex = GridEngine.hexagonal(w,h,{size:s});
+      hex.lines.forEach(l=>lines.push({x1:l.x1,y1:l.y1,x2:l.x2,y2:l.y2,color:'accent'}));
+    }
     return {lines, rects:[]};
   },
   hexagonal(w,h,p){
@@ -483,6 +522,92 @@ const GridEngine = {
       return out;
     }
     return {lines, rects:[]};
+  },
+  circular(w,h,p){
+    const cx=w/2, cy=h/2;
+    const rings=Math.max(1,Math.min(24,p.rings||6));
+    const spacing=p.spacing||40;
+    const spokes=Math.max(0,Math.min(48,p.spokes||0));
+    const arcs=[]; const lines=[];
+    for(let i=1;i<=rings;i++){
+      arcs.push({cx,cy,r:spacing*i, start:0, end:Math.PI*2, color: i%2===0?'secondary':'primary'});
+    }
+    if(spokes>0){
+      const maxR=spacing*rings;
+      for(let i=0;i<spokes;i++){
+        const a=(Math.PI*2*i)/spokes;
+        lines.push({x1:cx,y1:cy,x2:cx+maxR*Math.cos(a),y2:cy+maxR*Math.sin(a),color:'accent',faint:true});
+      }
+    }
+    return {lines, arcs, rects:[]};
+  },
+  customLines(w,h,p,customLines){
+    const diag=Math.sqrt(w*w+h*h);
+    const lines=(customLines||[]).map(cl=>{
+      const cx=w*(cl.px/100), cy=h*(cl.py/100);
+      const rad=cl.angle*Math.PI/180;
+      const half=diag*(cl.length/100)/2;
+      return {
+        x1:cx-half*Math.cos(rad), y1:cy-half*Math.sin(rad),
+        x2:cx+half*Math.cos(rad), y2:cy+half*Math.sin(rad),
+        color:'primary'
+      };
+    });
+    return {lines, rects:[]};
+  },
+  perspective(w,h,p){
+    const vps=p.vps||[];
+    const rays=Math.max(4,Math.min(48,p.rays||16));
+    const lines=[];
+    const roles=['primary','secondary','accent'];
+    vps.forEach((vp,idx)=>{
+      const vx=w*(vp.x/100), vy=h*(vp.y/100);
+      const len=Math.max(w,h)*2.2;
+      for(let i=0;i<rays;i++){
+        const a=(Math.PI*2*i)/rays;
+        lines.push({x1:vx,y1:vy,x2:vx+len*Math.cos(a),y2:vy+len*Math.sin(a), color:roles[idx%3], faint:i%2!==0});
+      }
+    });
+    return {lines, rects:[]};
+  },
+  manga(w,h,p){
+    const bleed=p.bleed||24, safe=p.safeMargin||36;
+    const trim={x:bleed,y:bleed,w:w-bleed*2,h:h-bleed*2,color:'accent'};
+    const safeRect={x:bleed+safe,y:bleed+safe,w:w-2*(bleed+safe),h:h-2*(bleed+safe),color:'secondary'};
+    const rects=[trim, safeRect];
+    const rows=Math.max(1,p.rows||3), cols=Math.max(1,p.cols||2), gutter=p.gutter||14;
+    const cw=(safeRect.w-gutter*(cols-1))/cols, ch=(safeRect.h-gutter*(rows-1))/rows;
+    for(let r=0;r<rows;r++){
+      for(let c=0;c<cols;c++){
+        rects.push({x:safeRect.x+c*(cw+gutter), y:safeRect.y+r*(ch+gutter), w:cw, h:ch, color:'primary'});
+      }
+    }
+    return {rects, lines:[]};
+  },
+  axial(w,h,p){
+    const cx=w/2, cy=h/2;
+    const count=Math.max(2,Math.min(24,p.axes||2));
+    const len=Math.max(w,h)*1.5;
+    const rotOffset=(p.rotation||0)*Math.PI/180;
+    const lines=[];
+    for(let i=0;i<count;i++){
+      const a=rotOffset + (Math.PI*i)/count;
+      lines.push({x1:cx-len*Math.cos(a), y1:cy-len*Math.sin(a), x2:cx+len*Math.cos(a), y2:cy+len*Math.sin(a), color: i===0?'accent':'primary'});
+    }
+    return {lines, rects:[]};
+  },
+  boxGrid(w,h,p){
+    const count=Math.max(1,Math.min(60,p.count||6)), cols=Math.max(1,p.columns||3);
+    const bw=p.boxW||160, bh=p.boxH||120, gutter=p.gutter||20;
+    const rows=Math.ceil(count/cols);
+    const totalW=cols*bw+(cols-1)*gutter, totalH=rows*bh+(rows-1)*gutter;
+    const ox=(w-totalW)/2, oy=(h-totalH)/2;
+    const rects=[];
+    for(let i=0;i<count;i++){
+      const r=Math.floor(i/cols), c=i%cols;
+      rects.push({x:ox+c*(bw+gutter), y:oy+r*(bh+gutter), w:bw, h:bh, color:'primary'});
+    }
+    return {rects, lines:[]};
   }
 };
 
@@ -535,15 +660,45 @@ const LIBRARY = [
     howto:['Base Unit sets the multiple (default 8px) — every 4th line is drawn bolder to mark 32px major steps.'],
     defaults:{base:8}},
   {id:'isometric', name:'Isometric Grid',
-    desc:'Lines at 30°/150°/90° building a pseudo-3D construction plane for consistent axonometric drawing.',
+    desc:'Three families of lines at 30°/150°/90°, spaced on a shared period so they form true equilateral triangles — the standard axonometric construction plane.',
     uses:['Isometric illustration','Game asset & level design','Technical / product diagrams'],
-    howto:['Spacing controls the distance between the diagonal construction lines.'],
-    defaults:{spacing:40}},
+    howto:['Spacing controls the distance between all three line families (kept equal on purpose so the triangles stay equilateral).','Hex Overlay adds a matching hexagon lattice on top, built from the same triangles — since a regular hex tiling is just six triangles fused together.'],
+    defaults:{spacing:40, hexOverlay:false}},
   {id:'hexagonal', name:'Hexagonal Grid',
     desc:'A tessellated hex lattice used for organic, non-rectilinear spatial structure.',
     uses:['Game boards & maps','Data visualisation (hex-bin)','Iconography & pattern design'],
     howto:['Hex Size controls the radius of each hexagon in the tessellation.'],
     defaults:{size:40}},
+  {id:'circular', name:'Circular Grid',
+    desc:'Concentric rings around a center point, with optional radiating spokes — for radial/circular composition.',
+    uses:['Circular logos & badges','Radial dashboards & gauges','Mandala / rotational-symmetry design'],
+    howto:['Rings sets how many concentric circles are drawn.','Ring Spacing controls the gap between each ring (this is what grows/shrinks the whole pattern).','Spokes adds radiating lines through the center — set to 0 for rings only.'],
+    defaults:{rings:6, spacing:40, spokes:12}},
+  {id:'customLines', name:'Straight Lines',
+    desc:'Freeform individual guide lines you place, angle, and resize by hand — for one-off alignments a preset grid does not give you.',
+    uses:['Ad-hoc alignment guides','Custom logo construction lines','Annotating a reference image (see the image underlay feature)'],
+    howto:['Each line has its own Position X/Y (where its center sits), Angle (rotation), and Length.','Use "+ ADD LINE" / ✕ to add or remove individual lines — each one is fully independent.'],
+    defaults:{}, defaultLines:[{px:50,py:30,angle:0,length:90},{px:50,py:70,angle:0,length:90},{px:30,py:50,angle:90,length:80}]},
+  {id:'perspective', name:'Perspective Grid',
+    desc:'Straight construction lines radiating from 1–6 vanishing points — the classic perspective-drawing guide, extended past 3-point for wide/fisheye-style layouts.',
+    uses:['Perspective drawing & comic backgrounds','Architectural / environment concept art','Product renders with consistent vanishing points'],
+    howto:['Vanishing Points sets how many VPs are active (1–6).','Each VP has its own X/Y position sliders — drag them to reposition exactly where your scene needs them.','Rays per VP controls how many construction lines radiate from each point.'],
+    defaults:{rays:16, vps:[{x:50,y:50}]}},
+  {id:'manga', name:'Manga / Comic Guide',
+    desc:'Standard comic-page structure: trim edge, safe margin, and a panel grid inside it — the same layered guide system used in professional comic templates.',
+    uses:['Comic & manga page layout','Storyboard panels','Print-ready sequential art'],
+    howto:['Bleed sets how far the trim edge is inset from the canvas (matches your print bleed allowance).','Safe Margin sets a further inset — keep dialogue/important art inside this line so nothing gets trimmed.','Rows/Columns/Gutter control the panel layout inside the safe area.'],
+    defaults:{bleed:24, safeMargin:36, rows:3, cols:2, gutter:14}},
+  {id:'axial', name:'Axial Grid',
+    desc:'Evenly-spaced axis lines radiating from one shared center point — a symmetry/compass guide for building balanced, rotationally-symmetric marks.',
+    uses:['Logo & icon symmetry','Mandala / rotational pattern design','Compass-rose or badge construction'],
+    howto:['Axes sets how many axis lines pass through the center (2 = a simple cross, more = a compass/star pattern).','Rotation Offset spins the whole axis set.'],
+    defaults:{axes:4, rotation:0}},
+  {id:'box', name:'Box Grid',
+    desc:'A repeating row of fixed-size boxes — for laying out equal-size cards, icons, or export tiles rather than dividing the whole canvas like Modular does.',
+    uses:['Icon / sticker sheets','Export-size tiling (app icons, social assets)','Card or thumbnail layouts'],
+    howto:['Count sets the total number of boxes; Columns sets how many per row before wrapping.','Box Width/Height sets each box\'s fixed size, and Gutter sets the spacing between them.'],
+    defaults:{count:6, columns:3, boxW:160, boxH:120, gutter:20}},
 ];
 
 const FIELD_DEFS = {
@@ -557,6 +712,12 @@ const FIELD_DEFS = {
   eightPoint:[['base','Base Unit',4,32]],
   isometric:[['spacing','Spacing',10,120]],
   hexagonal:[['size','Hex Size',10,100]],
+  circular:[['rings','Rings',1,24],['spacing','Ring Spacing',10,120],['spokes','Spokes',0,48]],
+  customLines:[],
+  perspective:[],
+  manga:[['bleed','Bleed',0,60],['safeMargin','Safe Margin',0,80],['rows','Panel Rows',1,6],['cols','Panel Columns',1,6],['gutter','Panel Gutter',0,40]],
+  axial:[['axes','Axes',2,24],['rotation','Rotation Offset',0,180]],
+  box:[['count','Count',1,60],['columns','Columns',1,12],['boxW','Box Width',30,400],['boxH','Box Height',30,400],['gutter','Gutter',0,80]],
 };
 
 const PRESETS = { mobile:{w:360,h:800}, web:{w:1440,h:900}, a4:{w:794,h:1123}, custom:{w:1200,h:800} };
@@ -574,6 +735,8 @@ function defaultColorFor(){ return {primary:'#00e5ff', secondary:'#ffd400', acce
 function createLayer(gridId){
   layerCounter++;
   const def = LIBRARY.find(g=>g.id===gridId);
+  const params = JSON.parse(JSON.stringify(def.defaults));
+  if(gridId==='perspective' && !params.vps){ params.vps = JSON.parse(JSON.stringify(def.defaults.vps||[{x:50,y:50}])); }
   return {
     id:'layer_'+layerCounter,
     gridId,
@@ -582,9 +745,12 @@ function createLayer(gridId){
     color: defaultColorFor(),
     rotation:0,
     offsetX:0, offsetY:0,
-    params: JSON.parse(JSON.stringify(def.defaults)),
+    scaleX:1, scaleY:1,
+    warpEnabled:false, warpCorners:null,
+    params: params,
     zones: def.defaultZones ? JSON.parse(JSON.stringify(def.defaultZones)) : undefined,
     guides: gridId==='manuscript' ? [] : undefined,
+    customLines: gridId==='customLines' ? JSON.parse(JSON.stringify(def.defaultLines||[])) : undefined,
   };
 }
 function activeLayer(){ return layers.find(l=>l.id===activeLayerId); }
@@ -598,6 +764,7 @@ const state = {
   objects:[], // {id,type:'rect'|'text', x,y,w,h,text}
   selectedObjectId:null,
   drag:null,
+  refImage:null, // {img, opacity, includeInExport}
 };
 
 const canvas = document.getElementById('stage');
@@ -645,8 +812,28 @@ function computeGridForLayer(layer, w, h){
     case 'eightPoint': return GridEngine.eightPoint(w,h,p);
     case 'isometric': return GridEngine.isometric(w,h,p);
     case 'hexagonal': return GridEngine.hexagonal(w,h,p);
+    case 'circular': return GridEngine.circular(w,h,p);
+    case 'customLines': return GridEngine.customLines(w,h,p,layer.customLines);
+    case 'perspective': return GridEngine.perspective(w,h,p);
+    case 'manga': return GridEngine.manga(w,h,p);
+    case 'axial': return GridEngine.axial(w,h,p);
+    case 'box': return GridEngine.boxGrid(w,h,p);
     default: return {lines:[],rects:[]};
   }
+}
+
+/* ============================================================
+   TEXT HALO — draws a background-contrasting outline behind any
+   canvas label so it stays legible in both dark and light theme
+   (previously labels could blend into a light canvas background).
+   ============================================================ */
+function drawLabel(targetCtx, text, x, y, fillColor, font){
+  targetCtx.font = font || '10px monospace';
+  targetCtx.lineWidth = 3;
+  targetCtx.strokeStyle = theme==='light' ? 'rgba(255,255,255,.9)' : 'rgba(2,4,10,.9)';
+  targetCtx.strokeText(text, x, y);
+  targetCtx.fillStyle = fillColor;
+  targetCtx.fillText(text, x, y);
 }
 
 function drawLayerGeometry(targetCtx, layer, w, h){
@@ -657,10 +844,8 @@ function drawLayerGeometry(targetCtx, layer, w, h){
     targetCtx.globalAlpha = r.isFrame ? 0.9 : 0.85;
     targetCtx.strokeRect(r.x+0.5, r.y+0.5, r.w, r.h);
     if(r.label){
-      targetCtx.fillStyle = roleColor(layer, r.color);
-      targetCtx.globalAlpha = 0.9;
-      targetCtx.font = '10px monospace';
-      targetCtx.fillText(r.label, r.x+6, r.y+14);
+      targetCtx.globalAlpha = 0.95;
+      drawLabel(targetCtx, r.label, r.x+6, r.y+14, roleColor(layer, r.color));
     }
   });
   (g.lines||[]).forEach(l=>{
@@ -676,6 +861,90 @@ function drawLayerGeometry(targetCtx, layer, w, h){
     targetCtx.beginPath(); targetCtx.arc(a.cx,a.cy,a.r,a.start,a.end); targetCtx.stroke();
   });
   targetCtx.globalAlpha = 1;
+}
+
+/* ============================================================
+   WARP — generic 4-corner bilinear distort. Applies to every
+   grid type the same way, since it operates on the already-
+   computed lines/rects/arcs rather than each grid's own math.
+   ============================================================ */
+function bilinear(u,v,corners){
+  const [c0,c1,c2,c3]=corners; // TL,TR,BR,BL
+  const x=(1-u)*(1-v)*c0.x + u*(1-v)*c1.x + u*v*c2.x + (1-u)*v*c3.x;
+  const y=(1-u)*(1-v)*c0.y + u*(1-v)*c1.y + u*v*c2.y + (1-u)*v*c3.y;
+  return {x,y};
+}
+function warpPt(pt,w,h,corners){ return bilinear(pt.x/w, pt.y/h, corners); }
+
+function currentTransformCorners(layer,w,h){
+  const rad=layer.rotation*Math.PI/180;
+  const sx=layer.scaleX||1, sy=layer.scaleY||1;
+  const cx=w/2+layer.offsetX, cy=h/2+layer.offsetY;
+  function xf(px,py){
+    const dx=(px-w/2)*sx, dy=(py-h/2)*sy;
+    const rx=dx*Math.cos(rad)-dy*Math.sin(rad);
+    const ry=dx*Math.sin(rad)+dy*Math.cos(rad);
+    return {x:cx+rx, y:cy+ry};
+  }
+  return [xf(0,0), xf(w,0), xf(w,h), xf(0,h)]; // TL,TR,BR,BL
+}
+function enableWarp(layer){
+  layer.warpCorners = currentTransformCorners(layer, canvas.width, canvas.height);
+  layer.warpEnabled = true;
+}
+function disableWarp(layer){ layer.warpEnabled=false; }
+
+function drawWarpedLayerGeometry(targetCtx, layer, w, h){
+  const g = computeGridForLayer(layer, w, h);
+  const corners = layer.warpCorners;
+  const SEG=14;
+  targetCtx.lineWidth=1;
+  function segPoints(x1,y1,x2,y2){
+    const pts=[];
+    for(let i=0;i<=SEG;i++){
+      const t=i/SEG;
+      pts.push(warpPt({x:x1+(x2-x1)*t, y:y1+(y2-y1)*t}, w,h, corners));
+    }
+    return pts;
+  }
+  function strokePts(pts){
+    targetCtx.beginPath();
+    pts.forEach((p,i)=>{ if(i===0) targetCtx.moveTo(p.x,p.y); else targetCtx.lineTo(p.x,p.y); });
+    targetCtx.stroke();
+  }
+  (g.rects||[]).forEach(r=>{
+    targetCtx.strokeStyle=roleColor(layer,r.color);
+    targetCtx.globalAlpha = r.isFrame?0.9:0.85;
+    const pts=[
+      ...segPoints(r.x,r.y,r.x+r.w,r.y),
+      ...segPoints(r.x+r.w,r.y,r.x+r.w,r.y+r.h).slice(1),
+      ...segPoints(r.x+r.w,r.y+r.h,r.x,r.y+r.h).slice(1),
+      ...segPoints(r.x,r.y+r.h,r.x,r.y).slice(1),
+    ];
+    strokePts(pts);
+    if(r.label){
+      const lp = warpPt({x:r.x+6,y:r.y+14}, w,h, corners);
+      drawLabel(targetCtx, r.label, lp.x, lp.y, roleColor(layer,r.color));
+    }
+  });
+  (g.lines||[]).forEach(l=>{
+    targetCtx.strokeStyle=roleColor(layer,l.color);
+    targetCtx.globalAlpha = l.faint?0.18:0.75;
+    targetCtx.setLineDash(l.dashed?[5,4]:[]);
+    strokePts(segPoints(l.x1,l.y1,l.x2,l.y2));
+  });
+  targetCtx.setLineDash([]);
+  (g.arcs||[]).forEach(a=>{
+    targetCtx.strokeStyle=roleColor(layer,a.color);
+    targetCtx.globalAlpha=0.8;
+    const pts=[]; const STEPS=32;
+    for(let i=0;i<=STEPS;i++){
+      const ang=a.start+(a.end-a.start)*(i/STEPS);
+      pts.push(warpPt({x:a.cx+a.r*Math.cos(ang), y:a.cy+a.r*Math.sin(ang)}, w,h, corners));
+    }
+    strokePts(pts);
+  });
+  targetCtx.globalAlpha=1;
 }
 
 /* ============================================================
@@ -703,15 +972,30 @@ function drawObjects(targetCtx, opts){
     } else {
       targetCtx.strokeStyle='#ff3b3b';
       targetCtx.strokeRect(o.x+0.5,o.y+0.5,o.w,o.h);
-      targetCtx.fillStyle='#ff3b3b';
-      targetCtx.font='12px monospace';
-      targetCtx.fillText(o.text||'Text block', o.x+6, o.y+16);
+      drawLabel(targetCtx, o.text||'Text block', o.x+6, o.y+16, '#ff3b3b', '12px monospace');
     }
     if(!opts.transparent && !opts.exportMode && o.id===state.selectedObjectId){
       targetCtx.fillStyle='#00e5ff';
       targetCtx.fillRect(o.x+o.w-8, o.y+o.h-8, 8, 8);
     }
   });
+}
+
+/* ============================================================
+   REFERENCE IMAGE UNDERLAY
+   ============================================================ */
+function drawReferenceImage(targetCtx, w, h, opts){
+  const ref = state.refImage;
+  if(!ref || !ref.img) return;
+  if(opts.transparent && !ref.includeInExport) return;
+  if(opts.exportMode && !opts.transparent && !ref.includeInExport) return;
+  targetCtx.save();
+  targetCtx.globalAlpha = ref.opacity;
+  const iw=ref.img.width, ih=ref.img.height;
+  const scale = Math.min(w/iw, h/ih);
+  const dw=iw*scale, dh=ih*scale;
+  targetCtx.drawImage(ref.img, (w-dw)/2, (h-dh)/2, dw, dh);
+  targetCtx.restore();
 }
 
 /* ============================================================
@@ -727,20 +1011,43 @@ function render(targetCtx, opts){
     targetCtx.fillRect(0,0,w,h);
   }
 
+  drawReferenceImage(targetCtx, w, h, opts);
+
   layers.forEach(layer=>{
     if(!layer.visible) return;
-    targetCtx.save();
-    targetCtx.translate(w/2+layer.offsetX, h/2+layer.offsetY);
-    targetCtx.rotate(layer.rotation*Math.PI/180);
-    targetCtx.translate(-w/2,-h/2);
-    drawLayerGeometry(targetCtx, layer, w, h);
-    targetCtx.restore();
+    if(layer.warpEnabled && layer.warpCorners){
+      drawWarpedLayerGeometry(targetCtx, layer, w, h);
+    } else {
+      targetCtx.save();
+      targetCtx.translate(w/2+layer.offsetX, h/2+layer.offsetY);
+      targetCtx.rotate(layer.rotation*Math.PI/180);
+      targetCtx.scale(layer.scaleX||1, layer.scaleY||1);
+      targetCtx.translate(-w/2,-h/2);
+      drawLayerGeometry(targetCtx, layer, w, h);
+      targetCtx.restore();
+    }
   });
 
   drawObjects(targetCtx, opts);
 
   if(!opts.transparent && !opts.exportMode){
     drawCorners(targetCtx,w,h);
+    const al = activeLayer();
+    if(al && al.warpEnabled && al.warpCorners){
+      al.warpCorners.forEach(c=>{
+        targetCtx.fillStyle='#00e5ff';
+        targetCtx.beginPath(); targetCtx.arc(c.x,c.y,7,0,Math.PI*2); targetCtx.fill();
+        targetCtx.strokeStyle='#000'; targetCtx.lineWidth=1.5; targetCtx.stroke();
+      });
+    }
+    if(al && al.gridId==='perspective'){
+      (al.params.vps||[]).forEach(vp=>{
+        const vx=w*(vp.x/100), vy=h*(vp.y/100);
+        targetCtx.fillStyle='#ffd400';
+        targetCtx.beginPath(); targetCtx.arc(vx,vy,6,0,Math.PI*2); targetCtx.fill();
+        targetCtx.strokeStyle='#000'; targetCtx.lineWidth=1.5; targetCtx.stroke();
+      });
+    }
   }
 }
 function drawCorners(targetCtx,w,h){
@@ -893,7 +1200,10 @@ function resetLayer(layer){
   layer.params = JSON.parse(JSON.stringify(def.defaults));
   layer.zones = def.defaultZones ? JSON.parse(JSON.stringify(def.defaultZones)) : undefined;
   layer.guides = layer.gridId==='manuscript' ? [] : undefined;
+  layer.customLines = layer.gridId==='customLines' ? JSON.parse(JSON.stringify(def.defaultLines||[])) : undefined;
   layer.rotation = 0; layer.offsetX = 0; layer.offsetY = 0;
+  layer.scaleX = 1; layer.scaleY = 1;
+  layer.warpEnabled = false; layer.warpCorners = null;
   layer.color = defaultColorFor();
   buildControls(); render();
 }
@@ -934,17 +1244,44 @@ function buildControls(){
   colorWrap.appendChild(colorRow);
   controlsEl.appendChild(colorWrap);
 
-  // TRANSFORM (rotate + move hint)
+  // TRANSFORM (rotate + scale + warp)
   const transWrap=document.createElement('div'); transWrap.className='field';
   transWrap.innerHTML='<label>TRANSFORM</label>';
-  const trow=document.createElement('div'); trow.style.cssText='display:flex;gap:10px;align-items:center;';
-  const rotBtn=document.createElement('button'); rotBtn.className='tbtn'; rotBtn.textContent='⟳ ROTATE 90°';
+
+  const trow=document.createElement('div'); trow.style.cssText='display:flex;gap:10px;align-items:center;margin-bottom:8px;';
+  const rotBtn=document.createElement('button'); rotBtn.className='tbtn'; rotBtn.textContent='⟳ 90°';
   rotBtn.addEventListener('click', ()=>{ layer.rotation=(layer.rotation+90)%360; buildControls(); render(); });
-  const rotLabel=document.createElement('span'); rotLabel.style.cssText='font-size:11px;color:var(--cyan);'; rotLabel.textContent=layer.rotation+'°';
-  trow.appendChild(rotBtn); trow.appendChild(rotLabel);
+  trow.appendChild(rotBtn);
+  const rotRange=document.createElement('input'); rotRange.type='range'; rotRange.min=0; rotRange.max=359; rotRange.value=((layer.rotation%360)+360)%360; rotRange.style.flex='1';
+  const rotLabel=document.createElement('span'); rotLabel.style.cssText='font-size:11px;color:var(--cyan);min-width:34px;text-align:right;'; rotLabel.textContent=Math.round(layer.rotation)+'°';
+  rotRange.addEventListener('input', ()=>{ layer.rotation=Number(rotRange.value); rotLabel.textContent=rotRange.value+'°'; render(); });
+  trow.appendChild(rotRange); trow.appendChild(rotLabel);
   transWrap.appendChild(trow);
+
+  if(!layer.warpEnabled){
+    ['scaleX','scaleY'].forEach((key,i)=>{
+      const srow=document.createElement('div'); srow.className='row'; srow.style.marginBottom='6px';
+      const slabel=document.createElement('span'); slabel.style.cssText='font-size:10px;color:var(--text-dim);width:56px;'; slabel.textContent = i===0?'Scale X':'Scale Y';
+      const sinput=document.createElement('input'); sinput.type='range'; sinput.min=30; sinput.max=300; sinput.value=Math.round((layer[key]||1)*100);
+      const sval=document.createElement('span'); sval.className='val'; sval.textContent=Math.round((layer[key]||1)*100)+'%';
+      sinput.addEventListener('input', ()=>{ layer[key]=Number(sinput.value)/100; sval.textContent=sinput.value+'%'; render(); });
+      srow.appendChild(slabel); srow.appendChild(sinput); srow.appendChild(sval);
+      transWrap.appendChild(srow);
+    });
+  }
+
+  const warpRow=document.createElement('div'); warpRow.style.cssText='display:flex;gap:8px;align-items:center;margin-top:6px;';
+  const warpBtn=document.createElement('button'); warpBtn.className='tbtn'+(layer.warpEnabled?' on':''); warpBtn.textContent=layer.warpEnabled?'WARP: ON':'WARP: OFF';
+  warpBtn.addEventListener('click', ()=>{
+    if(layer.warpEnabled) disableWarp(layer); else enableWarp(layer);
+    buildControls(); render();
+  });
+  warpRow.appendChild(warpBtn);
+  transWrap.appendChild(warpRow);
   const moveHint=document.createElement('div'); moveHint.className='hint';
-  moveHint.textContent='Turn on MOVE GRID in the toolbar, then drag on the canvas to reposition this layer.';
+  moveHint.textContent = layer.warpEnabled
+    ? 'Drag the 4 cyan corner handles on the canvas to distort this grid freely.'
+    : 'Turn on MOVE GRID in the toolbar, then drag on the canvas to reposition this layer.';
   transWrap.appendChild(moveHint);
   controlsEl.appendChild(transWrap);
 
@@ -972,11 +1309,27 @@ function buildControls(){
     controlsEl.appendChild(wrap);
   }
 
+  // ISOMETRIC — hex overlay toggle
+  if(layer.gridId==='isometric'){
+    const wrap=document.createElement('div'); wrap.className='field';
+    wrap.innerHTML='<label>HEX OVERLAY</label>';
+    const hexBtn=document.createElement('button'); hexBtn.className='tbtn'+(layer.params.hexOverlay?' on':''); hexBtn.textContent=layer.params.hexOverlay?'ON':'OFF';
+    hexBtn.addEventListener('click', ()=>{ layer.params.hexOverlay=!layer.params.hexOverlay; hexBtn.classList.toggle('on',layer.params.hexOverlay); hexBtn.textContent=layer.params.hexOverlay?'ON':'OFF'; render(); });
+    wrap.appendChild(hexBtn);
+    controlsEl.appendChild(wrap);
+  }
+
   // HIERARCHICAL — zones editor
   if(layer.gridId==='hierarchical'){ buildZonesEditor(layer); }
 
   // MANUSCRIPT — guides editor
   if(layer.gridId==='manuscript'){ buildGuidesEditor(layer); }
+
+  // STRAIGHT LINES — custom lines editor
+  if(layer.gridId==='customLines'){ buildCustomLinesEditor(layer); }
+
+  // PERSPECTIVE — vanishing points editor
+  if(layer.gridId==='perspective'){ buildVpsEditor(layer); }
 
   if(defs.length===0 && layer.gridId==='ruleOfThirds'){
     const p=document.createElement('div'); p.className='hint'; p.style.padding='2px 0 10px';
@@ -1028,6 +1381,79 @@ function buildGuidesEditor(layer){
   wrap.appendChild(addBtn);
   controlsEl.appendChild(wrap);
 }
+
+function buildCustomLinesEditor(layer){
+  const wrap=document.createElement('div'); wrap.className='field';
+  wrap.innerHTML='<label>LINES — each is independently positioned, angled, and sized</label>';
+  layer.customLines.forEach((cl,i)=>{
+    const box=document.createElement('div'); box.style.cssText='border:1px solid var(--line); padding:8px; margin-bottom:8px;';
+    const head=document.createElement('div'); head.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;';
+    head.innerHTML=`<span style="font-size:10px;color:var(--text-dim);">LINE ${i+1}</span>`;
+    const delBtn=document.createElement('button'); delBtn.className='tbtn'; delBtn.textContent='✕'; delBtn.style.cssText='padding:4px 8px;min-height:auto;';
+    delBtn.addEventListener('click', ()=>{ layer.customLines.splice(i,1); buildControls(); render(); });
+    head.appendChild(delBtn);
+    box.appendChild(head);
+    [['px','Position X',0,100],['py','Position Y',0,100],['angle','Angle',0,180],['length','Length',10,150]].forEach(([key,label,min,max])=>{
+      const row=document.createElement('div'); row.className='row'; row.style.marginBottom='4px';
+      const l=document.createElement('span'); l.textContent=label; l.style.cssText='font-size:9px;color:var(--text-dim);width:56px;';
+      const inp=document.createElement('input'); inp.type='range'; inp.min=min; inp.max=max; inp.value=cl[key];
+      const val=document.createElement('span'); val.className='val'; val.textContent=cl[key];
+      inp.addEventListener('input', ()=>{ cl[key]=Number(inp.value); val.textContent=inp.value; render(); });
+      row.appendChild(l); row.appendChild(inp); row.appendChild(val);
+      box.appendChild(row);
+    });
+    wrap.appendChild(box);
+  });
+  const addBtn=document.createElement('button'); addBtn.className='tbtn'; addBtn.textContent='+ ADD LINE'; addBtn.style.width='100%';
+  addBtn.addEventListener('click', ()=>{ layer.customLines.push({px:50,py:50,angle:0,length:90}); buildControls(); render(); });
+  wrap.appendChild(addBtn);
+  controlsEl.appendChild(wrap);
+}
+
+function buildVpsEditor(layer){
+  const wrap=document.createElement('div'); wrap.className='field';
+  wrap.innerHTML='<label>VANISHING POINTS (1–6) — drag the yellow dots on the canvas, or use the sliders</label>';
+  const countRow=document.createElement('div'); countRow.className='row'; countRow.style.marginBottom='10px';
+  const countLabel=document.createElement('span'); countLabel.style.cssText='font-size:10px;color:var(--text-dim);width:56px;'; countLabel.textContent='Count';
+  const countInp=document.createElement('input'); countInp.type='range'; countInp.min=1; countInp.max=6; countInp.value=layer.params.vps.length;
+  const countVal=document.createElement('span'); countVal.className='val'; countVal.textContent=layer.params.vps.length;
+  countInp.addEventListener('input', ()=>{
+    const n=Number(countInp.value); countVal.textContent=n;
+    const vps=layer.params.vps;
+    while(vps.length<n) vps.push({x:20+Math.random()*60, y:20+Math.random()*60});
+    while(vps.length>n) vps.pop();
+    buildControls(); render();
+  });
+  countRow.appendChild(countLabel); countRow.appendChild(countInp); countRow.appendChild(countVal);
+  wrap.appendChild(countRow);
+
+  layer.params.vps.forEach((vp,i)=>{
+    const box=document.createElement('div'); box.style.cssText='border:1px solid var(--line); padding:8px; margin-bottom:8px;';
+    box.innerHTML=`<span style="font-size:10px;color:var(--text-dim);">VP ${i+1}</span>`;
+    [['x','X Position'],['y','Y Position']].forEach(([key,label])=>{
+      const row=document.createElement('div'); row.className='row'; row.style.marginTop='4px';
+      const l=document.createElement('span'); l.textContent=label; l.style.cssText='font-size:9px;color:var(--text-dim);width:60px;';
+      const inp=document.createElement('input'); inp.type='range'; inp.min=-50; inp.max=150; inp.value=vp[key];
+      const val=document.createElement('span'); val.className='val'; val.textContent=Math.round(vp[key])+'%';
+      inp.addEventListener('input', ()=>{ vp[key]=Number(inp.value); val.textContent=inp.value+'%'; render(); });
+      row.appendChild(l); row.appendChild(inp); row.appendChild(val);
+      box.appendChild(row);
+    });
+    wrap.appendChild(box);
+  });
+
+  const raysRow=document.createElement('div'); raysRow.className='field';
+  raysRow.innerHTML='<label>Rays per VP</label>';
+  const raysInner=document.createElement('div'); raysInner.className='row';
+  const raysInp=document.createElement('input'); raysInp.type='range'; raysInp.min=4; raysInp.max=48; raysInp.value=layer.params.rays;
+  const raysVal=document.createElement('span'); raysVal.className='val'; raysVal.textContent=layer.params.rays;
+  raysInp.addEventListener('input', ()=>{ layer.params.rays=Number(raysInp.value); raysVal.textContent=raysInp.value; render(); });
+  raysInner.appendChild(raysInp); raysInner.appendChild(raysVal);
+  raysRow.appendChild(raysInner);
+  wrap.appendChild(raysRow);
+
+  controlsEl.appendChild(wrap);
+}
 </script>
 <script>
 /* ============================================================
@@ -1038,9 +1464,77 @@ document.getElementById('presetSel').addEventListener('change', e=>{
   document.getElementById('customDimGrp').style.display = state.preset==='custom' ? 'flex':'none';
   setCanvasSize(); state.objects=[]; render();
 });
+
+/* ---- Custom canvas size: multi-unit + aspect-ratio lock ---- */
+const UNIT_TO_PX = { px:1, in:96, cm:96/2.54, mm:96/25.4, m:96/0.0254, ft:96*12 };
+const customWInp=document.getElementById('customW');
+const customHInp=document.getElementById('customH');
+const customUnitSel=document.getElementById('customUnit');
+const customLockBtn=document.getElementById('customLock');
+const customPxHint=document.getElementById('customPxHint');
+
+let customLocked=false;
+let customAspect = 1200/800;
+let customPrevUnit='px';
+
+function currentCustomPx(){
+  const factor=UNIT_TO_PX[customUnitSel.value];
+  return {
+    w: Number(customWInp.value)*factor,
+    h: Number(customHInp.value)*factor,
+  };
+}
+function updatePxHint(){
+  const {w,h}=currentCustomPx();
+  customPxHint.textContent = '= '+Math.round(w)+' × '+Math.round(h)+' px';
+}
+function roundForUnit(v){
+  return v>=100 ? Math.round(v*10)/10 : Math.round(v*100)/100;
+}
+
+customLockBtn.addEventListener('click', ()=>{
+  customLocked=!customLocked;
+  if(customLocked){
+    const w=Number(customWInp.value)||1, h=Number(customHInp.value)||1;
+    customAspect = w/h;
+  }
+  customLockBtn.textContent = customLocked ? '🔒' : '🔓';
+  customLockBtn.classList.toggle('on', customLocked);
+});
+customWInp.addEventListener('input', ()=>{
+  if(customLocked){
+    const w=Number(customWInp.value)||0;
+    customHInp.value = roundForUnit(w/customAspect);
+  } else {
+    const w=Number(customWInp.value), h=Number(customHInp.value);
+    if(w>0 && h>0) customAspect = w/h;
+  }
+  updatePxHint();
+});
+customHInp.addEventListener('input', ()=>{
+  if(customLocked){
+    const h=Number(customHInp.value)||0;
+    customWInp.value = roundForUnit(h*customAspect);
+  } else {
+    const w=Number(customWInp.value), h=Number(customHInp.value);
+    if(w>0 && h>0) customAspect = w/h;
+  }
+  updatePxHint();
+});
+customUnitSel.addEventListener('change', ()=>{
+  const oldFactor=UNIT_TO_PX[customPrevUnit], newFactor=UNIT_TO_PX[customUnitSel.value];
+  const wPx=Number(customWInp.value)*oldFactor, hPx=Number(customHInp.value)*oldFactor;
+  customWInp.value = roundForUnit(wPx/newFactor);
+  customHInp.value = roundForUnit(hPx/newFactor);
+  customPrevUnit = customUnitSel.value;
+  updatePxHint();
+});
+updatePxHint();
+
 document.getElementById('customApply').addEventListener('click', ()=>{
-  const w=Math.max(50,Math.min(4000,Number(document.getElementById('customW').value)||1200));
-  const h=Math.max(50,Math.min(4000,Number(document.getElementById('customH').value)||800));
+  const {w:wPxRaw,h:hPxRaw} = currentCustomPx();
+  const w=Math.max(50,Math.min(8000, Math.round(wPxRaw)||1200));
+  const h=Math.max(50,Math.min(8000, Math.round(hPxRaw)||800));
   PRESETS.custom = {w,h};
   state.preset='custom';
   document.getElementById('presetSel').value='custom';
@@ -1074,6 +1568,54 @@ document.getElementById('clearObjs').addEventListener('click', ()=>{ state.objec
 document.getElementById('themeBtn').addEventListener('click', ()=>{ setTheme(theme==='dark'?'light':'dark'); });
 
 /* ============================================================
+   REFERENCE IMAGE UPLOAD
+   ============================================================ */
+const refImgInput=document.getElementById('refImgInput');
+const refOpacityField=document.getElementById('refOpacityField');
+const refControlsRow=document.getElementById('refControlsRow');
+const refOpacity=document.getElementById('refOpacity');
+const refOpacityVal=document.getElementById('refOpacityVal');
+const refIncludeBtn=document.getElementById('refIncludeBtn');
+const refRemoveBtn=document.getElementById('refRemoveBtn');
+
+refImgInput.addEventListener('change', (e)=>{
+  const file=e.target.files[0];
+  if(!file) return;
+  const reader=new FileReader();
+  reader.onload=(ev)=>{
+    const img=new Image();
+    img.onload=()=>{
+      state.refImage = {img, opacity:0.6, includeInExport:false};
+      refOpacityField.style.display='block';
+      refControlsRow.style.display='flex';
+      refIncludeBtn.textContent='EXCLUDE FROM EXPORT';
+      refIncludeBtn.classList.remove('on');
+      render();
+    };
+    img.src=ev.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+refOpacity.addEventListener('input', ()=>{
+  refOpacityVal.textContent=refOpacity.value+'%';
+  if(state.refImage){ state.refImage.opacity=Number(refOpacity.value)/100; render(); }
+});
+refIncludeBtn.addEventListener('click', ()=>{
+  if(!state.refImage) return;
+  state.refImage.includeInExport = !state.refImage.includeInExport;
+  refIncludeBtn.textContent = state.refImage.includeInExport ? 'INCLUDED IN EXPORT' : 'EXCLUDE FROM EXPORT';
+  refIncludeBtn.classList.toggle('on', state.refImage.includeInExport);
+});
+refRemoveBtn.addEventListener('click', ()=>{
+  state.refImage=null;
+  refImgInput.value='';
+  refOpacityField.style.display='none';
+  refControlsRow.style.display='none';
+  render();
+});
+
+
+/* ============================================================
    CANVAS MOUSE INTERACTION — select/move/resize objects,
    or move the active grid layer when MOVE GRID is on.
    ============================================================ */
@@ -1095,8 +1637,39 @@ function hitHandle(x,y){
   if(Math.abs(x-hx)<=9 && Math.abs(y-hy)<=9) return o;
   return null;
 }
+function hitWarpCorner(x,y){
+  const layer = activeLayer();
+  if(!layer || !layer.warpEnabled || !layer.warpCorners) return null;
+  for(let i=0;i<4;i++){
+    const c=layer.warpCorners[i];
+    if(Math.hypot(x-c.x,y-c.y)<=10) return {layer, index:i};
+  }
+  return null;
+}
+function hitVpHandle(x,y){
+  const layer = activeLayer();
+  if(!layer || layer.gridId!=='perspective') return null;
+  const vps = layer.params.vps||[];
+  for(let i=0;i<vps.length;i++){
+    const vx=canvas.width*(vps[i].x/100), vy=canvas.height*(vps[i].y/100);
+    if(Math.hypot(x-vx,y-vy)<=10) return {layer, index:i};
+  }
+  return null;
+}
 canvas.addEventListener('mousedown', e=>{
   const {x,y}=toCanvasCoords(e);
+
+  const warpHit = hitWarpCorner(x,y);
+  if(warpHit){
+    state.drag = {mode:'warp-corner', layer:warpHit.layer, index:warpHit.index};
+    return;
+  }
+  const vpHit = hitVpHandle(x,y);
+  if(vpHit){
+    state.drag = {mode:'vp', layer:vpHit.layer, index:vpHit.index};
+    return;
+  }
+
   const handleObj = hitHandle(x,y);
   if(handleObj){
     state.drag = {mode:'resize', obj:handleObj, startX:x, startY:y, startW:handleObj.w, startH:handleObj.h};
@@ -1130,6 +1703,12 @@ canvas.addEventListener('mousemove', e=>{
   } else if(d.mode==='move-layer'){
     d.layer.offsetX = d.startOffX + (x-d.startX);
     d.layer.offsetY = d.startOffY + (y-d.startY);
+  } else if(d.mode==='warp-corner'){
+    d.layer.warpCorners[d.index] = {x, y};
+  } else if(d.mode==='vp'){
+    const px = Math.max(-50, Math.min(150, (x/canvas.width)*100));
+    const py = Math.max(-50, Math.min(150, (y/canvas.height)*100));
+    d.layer.params.vps[d.index] = {x:px, y:py};
   }
   render();
 });
@@ -1238,12 +1817,19 @@ document.getElementById('expPdf').addEventListener('click', ()=>{
     else fn();
   }
   function applyLayerTransform(pt, layer){
+    if(layer.warpEnabled && layer.warpCorners){
+      return bilinear(pt.x/w, pt.y/h, layer.warpCorners);
+    }
     const rad = layer.rotation*Math.PI/180;
+    const sx = layer.scaleX||1, sy = layer.scaleY||1;
     const cx=w/2+layer.offsetX, cy=h/2+layer.offsetY;
-    const dx = pt.x - w/2, dy = pt.y - h/2;
+    const dx = (pt.x - w/2)*sx, dy = (pt.y - h/2)*sy;
     const rx = dx*Math.cos(rad) - dy*Math.sin(rad);
     const ry = dx*Math.sin(rad) + dy*Math.cos(rad);
     return { x: rx + cx, y: ry + cy };
+  }
+  function isAxisAligned(layer){
+    return !layer.warpEnabled && layer.rotation%360===0 && (layer.scaleX||1)===1 && (layer.scaleY||1)===1;
   }
 
   pdf.setLineWidth(1);
@@ -1253,16 +1839,29 @@ document.getElementById('expPdf').addEventListener('click', ()=>{
     (g.lines||[]).forEach(l=>{
       const [r,gg,b]=hexToRgbArr(roleColor(layer,l.color));
       pdf.setDrawColor(r,gg,b);
-      const p1=applyLayerTransform({x:l.x1,y:l.y1},layer), p2=applyLayerTransform({x:l.x2,y:l.y2},layer);
-      withOpacity(l.faint?0.25:0.85, ()=>{ pdf.line(p1.x,p1.y,p2.x,p2.y); });
+      if(layer.warpEnabled){
+        // subdivide so a straight line still reads correctly once warped
+        const SEG=14; let prev=null;
+        withOpacity(l.faint?0.25:0.85, ()=>{
+          for(let i=0;i<=SEG;i++){
+            const t=i/SEG;
+            const pt=applyLayerTransform({x:l.x1+(l.x2-l.x1)*t, y:l.y1+(l.y2-l.y1)*t}, layer);
+            if(prev) pdf.line(prev.x,prev.y,pt.x,pt.y);
+            prev=pt;
+          }
+        });
+      } else {
+        const p1=applyLayerTransform({x:l.x1,y:l.y1},layer), p2=applyLayerTransform({x:l.x2,y:l.y2},layer);
+        withOpacity(l.faint?0.25:0.85, ()=>{ pdf.line(p1.x,p1.y,p2.x,p2.y); });
+      }
     });
     (g.rects||[]).forEach(r=>{
-      if(layer.rotation%360===0){
+      if(isAxisAligned(layer)){
         const [rr,gg,b]=hexToRgbArr(roleColor(layer,r.color));
         pdf.setDrawColor(rr,gg,b);
         withOpacity(r.isFrame?0.9:0.85, ()=>{ pdf.rect(r.x+layer.offsetX, r.y+layer.offsetY, r.w, r.h, 'S'); });
       } else {
-        // rotated rect: draw as 4 separate line objects so it still stays vector/editable
+        // transformed rect (rotated/scaled/warped): draw as 4 separate line objects so it stays vector/editable
         const corners=[{x:r.x,y:r.y},{x:r.x+r.w,y:r.y},{x:r.x+r.w,y:r.y+r.h},{x:r.x,y:r.y+r.h}].map(pt=>applyLayerTransform(pt,layer));
         const [rr,gg,b]=hexToRgbArr(roleColor(layer,r.color));
         pdf.setDrawColor(rr,gg,b);
@@ -1275,7 +1874,7 @@ document.getElementById('expPdf').addEventListener('click', ()=>{
       // approximate arc as a short polyline of separate line segments (kept vector, no raster)
       const [rr,gg,b]=hexToRgbArr(roleColor(layer,a.color));
       pdf.setDrawColor(rr,gg,b);
-      const steps=16; let prev=null;
+      const steps=24; let prev=null;
       withOpacity(0.8, ()=>{
         for(let i=0;i<=steps;i++){
           const ang=a.start + (a.end-a.start)*(i/steps);
