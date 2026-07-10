@@ -1,7 +1,4 @@
 # GridLab YD
-
-![GridLab YD Banner](./assets/banner.png)
-
 ## About
 
 **GridLab YD** is an open-source creative composition tool designed to help photographers, videographers, designers, and creators organize and plan visual layouts using customizable grid systems and guides.
