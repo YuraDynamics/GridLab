@@ -74,6 +74,18 @@
   }
   button.tbtn:hover{border-color:var(--cyan); color:var(--cyan);}
   button.tbtn.on{border-color:var(--yellow); color:var(--yellow);}
+  button.tbtn:disabled{opacity:0.35; cursor:default; border-color:var(--line); color:var(--text-dim);}
+  button.tbtn:disabled:hover{border-color:var(--line); color:var(--text-dim);}
+
+  #overviewPanel{
+    position:absolute; bottom:16px; right:16px; z-index:20;
+    background:rgba(10,15,22,.85); border:1px solid var(--line);
+    padding:6px; backdrop-filter:blur(4px);
+  }
+  body.light #overviewPanel{ background:rgba(255,255,255,.9); }
+  .overview-label{font-size:9px; letter-spacing:2px; color:var(--text-dim); margin-bottom:4px;}
+  #overviewCanvas{display:block; background:#000; box-shadow:0 0 0 1px var(--line);}
+
 
   select, input[type=number], input[type=text]{
     background:var(--panel-2); border:1px solid var(--line); color:var(--text-bright);
@@ -106,7 +118,7 @@
   .lib-card h3{margin:0 0 8px; font-size:12px; color:var(--text-bright); letter-spacing:1px;}
   .lib-card p{margin:0 0 8px; line-height:1.6; color:var(--text); font-size:11.5px;}
 
-  .center{display:flex; flex-direction:column; min-width:0; min-height:0;}
+  .center{display:flex; flex-direction:column; min-width:0; min-height:0; position:relative;}
   .toolbar{
     display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line);
     flex-wrap:wrap; background:rgba(10,15,22,.4);
@@ -257,6 +269,10 @@
   <div class="center">
     <div class="toolbar">
       <div class="grp">
+        <button class="tbtn" id="undoBtn" title="Undo (Ctrl+Z)" disabled>↶ UNDO</button>
+        <button class="tbtn" id="redoBtn" title="Redo (Ctrl+Shift+Z)" disabled>↷ REDO</button>
+      </div>
+      <div class="grp">
         <label>PRESET</label>
         <select id="presetSel">
           <option value="mobile">Mobile 360×800</option>
@@ -293,15 +309,23 @@
       <div class="grp">
         <button class="tbtn" id="snapBtn">SNAP: ON</button>
         <button class="tbtn" id="moveBtn">MOVE GRID</button>
+        <button class="tbtn" id="centerSnapBtn">CENTER SNAP: ON</button>
       </div>
       <div class="grp">
         <button class="tbtn" id="addRect">+ RECT</button>
         <button class="tbtn" id="addText">+ TEXT</button>
         <button class="tbtn" id="clearObjs">CLEAR</button>
       </div>
+      <div class="grp">
+        <button class="tbtn" id="overviewBtn">OVERVIEW: ON</button>
+      </div>
     </div>
     <div class="canvas-wrap" id="stageWrap">
       <canvas id="stage" width="1440" height="900"></canvas>
+    </div>
+    <div id="overviewPanel">
+      <div class="overview-label">OVERVIEW</div>
+      <canvas id="overviewCanvas" width="220" height="140"></canvas>
     </div>
   </div>
 
@@ -791,8 +815,103 @@ function applyZoom(){
   document.getElementById('zoomLabel').textContent = Math.round(state.zoom*100)+'%';
   canvas.style.width=(canvas.width*state.zoom)+'px';
   canvas.style.height=(canvas.height*state.zoom)+'px';
+  if(typeof drawOverview==='function') drawOverview();
 }
 window.addEventListener('resize', ()=>{ fitZoom(); });
+
+/* Wheel zoom — keeps the point under the cursor visually stable while zooming */
+document.getElementById('stageWrap').addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const wrap = document.getElementById('stageWrap');
+  const rect = wrap.getBoundingClientRect();
+  const cursorX = e.clientX - rect.left + wrap.scrollLeft;
+  const cursorY = e.clientY - rect.top + wrap.scrollTop;
+  const canvasX = cursorX - (wrap.clientWidth>canvas.clientWidth ? (wrap.clientWidth-canvas.clientWidth)/2 : 0);
+  const canvasY = cursorY - (wrap.clientHeight>canvas.clientHeight ? (wrap.clientHeight-canvas.clientHeight)/2 : 0);
+  const ratioX = canvasX / (canvas.width*state.zoom);
+  const ratioY = canvasY / (canvas.height*state.zoom);
+
+  const delta = e.deltaY < 0 ? 0.1 : -0.1;
+  const newZoom = Math.max(0.1, Math.min(3, Math.round((state.zoom+delta)*100)/100));
+  state.zoom = newZoom;
+  applyZoom();
+
+  wrap.scrollLeft = Math.max(0, ratioX*(canvas.width*state.zoom) - (e.clientX-rect.left));
+  wrap.scrollTop = Math.max(0, ratioY*(canvas.height*state.zoom) - (e.clientY-rect.top));
+}, {passive:false});
+
+/* ============================================================
+   UNDO / REDO HISTORY
+   ============================================================ */
+let historyStack = [];
+let redoStack = [];
+let historyLocked = false;
+const MAX_HISTORY = 60;
+
+function snapshotState(){
+  return JSON.stringify({
+    layers: layers,
+    activeLayerId: activeLayerId,
+    objects: state.objects,
+    selectedObjectId: state.selectedObjectId,
+    preset: state.preset,
+    customDims: PRESETS.custom,
+  });
+}
+function pushHistory(){
+  redoStack.length = 0;
+  historyStack.push(snapshotState());
+  if(historyStack.length > MAX_HISTORY) historyStack.shift();
+  updateUndoRedoButtons();
+}
+function pushHistoryGuarded(){
+  if(!historyLocked){ pushHistory(); historyLocked = true; }
+}
+function releaseHistoryGuard(){ historyLocked = false; }
+document.addEventListener('change', releaseHistoryGuard, true);
+document.addEventListener('mouseup', releaseHistoryGuard);
+
+function restoreSnapshot(json){
+  const s = JSON.parse(json);
+  layers = s.layers;
+  activeLayerId = s.activeLayerId;
+  state.objects = s.objects;
+  state.selectedObjectId = s.selectedObjectId;
+  state.preset = s.preset;
+  PRESETS.custom = s.customDims;
+  document.getElementById('presetSel').value = state.preset;
+  document.getElementById('customDimGrp').style.display = state.preset==='custom' ? 'flex':'none';
+  setCanvasSize();
+  buildLayersPanel(); buildControls(); updateLibCard(); render();
+}
+function undo(){
+  if(historyStack.length===0) return;
+  const current = snapshotState();
+  const prev = historyStack.pop();
+  redoStack.push(current);
+  restoreSnapshot(prev);
+  updateUndoRedoButtons();
+}
+function redo(){
+  if(redoStack.length===0) return;
+  const current = snapshotState();
+  const next = redoStack.pop();
+  historyStack.push(current);
+  restoreSnapshot(next);
+  updateUndoRedoButtons();
+}
+function updateUndoRedoButtons(){
+  document.getElementById('undoBtn').disabled = historyStack.length===0;
+  document.getElementById('redoBtn').disabled = redoStack.length===0;
+}
+document.getElementById('undoBtn').addEventListener('click', undo);
+document.getElementById('redoBtn').addEventListener('click', redo);
+window.addEventListener('keydown', (e)=>{
+  const tag = (e.target.tagName||'').toLowerCase();
+  if(tag==='input' || tag==='textarea' || tag==='select') return;
+  if((e.ctrlKey||e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z'){ e.preventDefault(); undo(); }
+  else if((e.ctrlKey||e.metaKey) && (e.shiftKey && e.key.toLowerCase()==='z' || e.key.toLowerCase()==='y')){ e.preventDefault(); redo(); }
+});
 
 /* ============================================================
    COLOR ROLE RESOLUTION + PER-LAYER GRID COMPUTATION
@@ -1049,6 +1168,7 @@ function render(targetCtx, opts){
       });
     }
   }
+  if(targetCtx===ctx){ drawOverview(); }
 }
 function drawCorners(targetCtx,w,h){
   drawCorner(targetCtx,8,8,1,1); drawCorner(targetCtx,w-8,8,-1,1);
@@ -1061,6 +1181,69 @@ function drawCorner(targetCtx,x,y,dx,dy){
   targetCtx.moveTo(x, y+s*dy); targetCtx.lineTo(x,y); targetCtx.lineTo(x+s*dx,y);
   targetCtx.stroke();
 }
+
+/* ============================================================
+   OVERVIEW / MINIMAP PANEL — always shows the whole canvas,
+   deliberately WITHOUT grid lines so it stays readable at small
+   size; shows the reference image, test objects, and a yellow
+   box marking what part of the canvas the main view is showing.
+   ============================================================ */
+function drawOverview(){
+  if(state.showOverview===false) return;
+  const ov = document.getElementById('overviewCanvas');
+  if(!ov) return;
+  const octx = ov.getContext('2d');
+  const ow=ov.width, oh=ov.height;
+  octx.clearRect(0,0,ow,oh);
+  octx.fillStyle = getComputedStyle(document.body).getPropertyValue('--stage-bg').trim() || '#02040a';
+  octx.fillRect(0,0,ow,oh);
+
+  const w=canvas.width, h=canvas.height;
+  const scale = Math.min(ow/w, oh/h);
+  const dw=w*scale, dh=h*scale;
+  const offX=(ow-dw)/2, offY=(oh-dh)/2;
+
+  if(state.refImage && state.refImage.img){
+    const img=state.refImage.img;
+    const iscale=Math.min(dw/img.width, dh/img.height);
+    const iw=img.width*iscale, ih=img.height*iscale;
+    octx.globalAlpha=0.55;
+    octx.drawImage(img, offX+(dw-iw)/2, offY+(dh-ih)/2, iw, ih);
+    octx.globalAlpha=1;
+  }
+
+  state.objects.forEach(o=>{
+    octx.fillStyle = o.type==='rect' ? 'rgba(255,212,0,.55)' : 'rgba(255,59,59,.55)';
+    octx.fillRect(offX+o.x*scale, offY+o.y*scale, Math.max(2,o.w*scale), Math.max(2,o.h*scale));
+  });
+
+  octx.strokeStyle='rgba(0,229,255,.6)'; octx.lineWidth=1;
+  octx.strokeRect(offX+0.5, offY+0.5, dw, dh);
+
+  const wrap=document.getElementById('stageWrap');
+  if(wrap && wrap.clientWidth>0){
+    const vx=wrap.scrollLeft/state.zoom, vy=wrap.scrollTop/state.zoom;
+    const vw=Math.min(w, wrap.clientWidth/state.zoom), vh=Math.min(h, wrap.clientHeight/state.zoom);
+    octx.strokeStyle='#ffd400'; octx.lineWidth=1.5;
+    octx.strokeRect(offX+vx*scale+0.5, offY+vy*scale+0.5, Math.max(2,vw*scale), Math.max(2,vh*scale));
+  }
+}
+document.getElementById('overviewCanvas').addEventListener('click', (e)=>{
+  const ov=document.getElementById('overviewCanvas');
+  const rect=ov.getBoundingClientRect();
+  const ow=ov.width, oh=ov.height;
+  const w=canvas.width, h=canvas.height;
+  const scale=Math.min(ow/w, oh/h);
+  const dw=w*scale, dh=h*scale;
+  const offX=(ow-dw)/2, offY=(oh-dh)/2;
+  const clickX=(e.clientX-rect.left)*(ow/rect.width), clickY=(e.clientY-rect.top)*(oh/rect.height);
+  const canvasPtX=(clickX-offX)/scale, canvasPtY=(clickY-offY)/scale;
+  const wrap=document.getElementById('stageWrap');
+  wrap.scrollLeft = Math.max(0, canvasPtX*state.zoom - wrap.clientWidth/2);
+  wrap.scrollTop = Math.max(0, canvasPtY*state.zoom - wrap.clientHeight/2);
+  drawOverview();
+});
+document.getElementById('stageWrap').addEventListener('scroll', drawOverview);
 
 /* ============================================================
    SNAP LOGIC — snaps relative to the ACTIVE layer's actual grid
@@ -1114,24 +1297,41 @@ function buildLayersPanel(){
     listEl.innerHTML = '<div class="hint" style="padding:6px 14px 14px;">No grids yet — add one below to begin.</div>';
     return;
   }
-  layers.forEach(layer=>{
+  layers.forEach((layer,idx)=>{
     const row=document.createElement('div');
     row.className = 'layer-row' + (layer.id===activeLayerId ? ' active':'');
     const eye=document.createElement('button'); eye.className='eye'; eye.textContent = layer.visible?'●':'○'; eye.title='Toggle visibility';
     const name=document.createElement('span'); name.className='lname'; name.textContent=layer.name;
+    const up=document.createElement('button'); up.className='ren'; up.textContent='▲'; up.title='Move up (in front)';
+    const down=document.createElement('button'); down.className='ren'; down.textContent='▼'; down.title='Move down (behind)';
     const ren=document.createElement('button'); ren.className='ren'; ren.textContent='✎'; ren.title='Rename';
     const del=document.createElement('button'); del.className='del'; del.textContent='✕'; del.title='Delete';
-    row.appendChild(eye); row.appendChild(name); row.appendChild(ren); row.appendChild(del);
+    row.appendChild(eye); row.appendChild(name); row.appendChild(up); row.appendChild(down); row.appendChild(ren); row.appendChild(del);
 
     row.addEventListener('click', ()=>{ activeLayerId=layer.id; buildLayersPanel(); buildControls(); updateLibCard(); render(); });
-    eye.addEventListener('click', (e)=>{ e.stopPropagation(); layer.visible=!layer.visible; buildLayersPanel(); render(); });
+    eye.addEventListener('click', (e)=>{ e.stopPropagation(); pushHistory(); layer.visible=!layer.visible; buildLayersPanel(); render(); });
+    up.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      if(idx>=layers.length-1) return;
+      pushHistory();
+      [layers[idx], layers[idx+1]] = [layers[idx+1], layers[idx]];
+      buildLayersPanel(); render();
+    });
+    down.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      if(idx<=0) return;
+      pushHistory();
+      [layers[idx], layers[idx-1]] = [layers[idx-1], layers[idx]];
+      buildLayersPanel(); render();
+    });
     ren.addEventListener('click', (e)=>{
       e.stopPropagation();
       const n = prompt('Rename this layer:', layer.name);
-      if(n && n.trim()){ layer.name = n.trim(); buildLayersPanel(); updateLibCard(); }
+      if(n && n.trim()){ pushHistory(); layer.name = n.trim(); buildLayersPanel(); updateLibCard(); }
     });
     del.addEventListener('click', (e)=>{
       e.stopPropagation();
+      pushHistory();
       layers = layers.filter(l=>l.id!==layer.id);
       if(activeLayerId===layer.id){ activeLayerId = layers.length ? layers[layers.length-1].id : null; }
       buildLayersPanel(); buildControls(); updateLibCard(); render();
@@ -1141,6 +1341,7 @@ function buildLayersPanel(){
 }
 
 function addLayer(gridId){
+  pushHistory();
   const layer = createLayer(gridId);
   layers.push(layer);
   activeLayerId = layer.id;
@@ -1196,6 +1397,7 @@ document.getElementById('tutModal').addEventListener('click', (e)=>{ if(e.target
 const controlsEl = document.getElementById('controls');
 
 function resetLayer(layer){
+  pushHistory();
   const def = LIBRARY.find(g=>g.id===layer.gridId);
   layer.params = JSON.parse(JSON.stringify(def.defaults));
   layer.zones = def.defaultZones ? JSON.parse(JSON.stringify(def.defaultZones)) : undefined;
@@ -1236,7 +1438,7 @@ function buildControls(){
     const cwrap=document.createElement('div'); cwrap.style.cssText='display:flex;flex-direction:column;align-items:center;gap:4px;';
     const inp=document.createElement('input'); inp.type='color'; inp.value=layer.color[role];
     inp.style.cssText='width:38px;height:30px;padding:0;border:1px solid var(--line);background:none;cursor:pointer;';
-    inp.addEventListener('input', ()=>{ layer.color[role]=inp.value; render(); });
+    inp.addEventListener('input', ()=>{ pushHistoryGuarded(); layer.color[role]=inp.value; render(); });
     const lbl=document.createElement('span'); lbl.textContent=role.charAt(0).toUpperCase()+role.slice(1); lbl.style.cssText='font-size:9px;color:var(--text-dim);';
     cwrap.appendChild(inp); cwrap.appendChild(lbl);
     colorRow.appendChild(cwrap);
@@ -1250,11 +1452,11 @@ function buildControls(){
 
   const trow=document.createElement('div'); trow.style.cssText='display:flex;gap:10px;align-items:center;margin-bottom:8px;';
   const rotBtn=document.createElement('button'); rotBtn.className='tbtn'; rotBtn.textContent='⟳ 90°';
-  rotBtn.addEventListener('click', ()=>{ layer.rotation=(layer.rotation+90)%360; buildControls(); render(); });
+  rotBtn.addEventListener('click', ()=>{ pushHistory(); layer.rotation=(layer.rotation+90)%360; buildControls(); render(); });
   trow.appendChild(rotBtn);
   const rotRange=document.createElement('input'); rotRange.type='range'; rotRange.min=0; rotRange.max=359; rotRange.value=((layer.rotation%360)+360)%360; rotRange.style.flex='1';
   const rotLabel=document.createElement('span'); rotLabel.style.cssText='font-size:11px;color:var(--cyan);min-width:34px;text-align:right;'; rotLabel.textContent=Math.round(layer.rotation)+'°';
-  rotRange.addEventListener('input', ()=>{ layer.rotation=Number(rotRange.value); rotLabel.textContent=rotRange.value+'°'; render(); });
+  rotRange.addEventListener('input', ()=>{ pushHistoryGuarded(); layer.rotation=Number(rotRange.value); rotLabel.textContent=rotRange.value+'°'; render(); });
   trow.appendChild(rotRange); trow.appendChild(rotLabel);
   transWrap.appendChild(trow);
 
@@ -1264,7 +1466,7 @@ function buildControls(){
       const slabel=document.createElement('span'); slabel.style.cssText='font-size:10px;color:var(--text-dim);width:56px;'; slabel.textContent = i===0?'Scale X':'Scale Y';
       const sinput=document.createElement('input'); sinput.type='range'; sinput.min=30; sinput.max=300; sinput.value=Math.round((layer[key]||1)*100);
       const sval=document.createElement('span'); sval.className='val'; sval.textContent=Math.round((layer[key]||1)*100)+'%';
-      sinput.addEventListener('input', ()=>{ layer[key]=Number(sinput.value)/100; sval.textContent=sinput.value+'%'; render(); });
+      sinput.addEventListener('input', ()=>{ pushHistoryGuarded(); layer[key]=Number(sinput.value)/100; sval.textContent=sinput.value+'%'; render(); });
       srow.appendChild(slabel); srow.appendChild(sinput); srow.appendChild(sval);
       transWrap.appendChild(srow);
     });
@@ -1273,6 +1475,7 @@ function buildControls(){
   const warpRow=document.createElement('div'); warpRow.style.cssText='display:flex;gap:8px;align-items:center;margin-top:6px;';
   const warpBtn=document.createElement('button'); warpBtn.className='tbtn'+(layer.warpEnabled?' on':''); warpBtn.textContent=layer.warpEnabled?'WARP: ON':'WARP: OFF';
   warpBtn.addEventListener('click', ()=>{
+    pushHistory();
     if(layer.warpEnabled) disableWarp(layer); else enableWarp(layer);
     buildControls(); render();
   });
@@ -1281,7 +1484,7 @@ function buildControls(){
   const moveHint=document.createElement('div'); moveHint.className='hint';
   moveHint.textContent = layer.warpEnabled
     ? 'Drag the 4 cyan corner handles on the canvas to distort this grid freely.'
-    : 'Turn on MOVE GRID in the toolbar, then drag on the canvas to reposition this layer.';
+    : 'Turn on MOVE GRID in the toolbar, then drag on the canvas to reposition this layer. Turn on CENTER SNAP to have it snap back to perfectly centered when you drag it close to the middle.';
   transWrap.appendChild(moveHint);
   controlsEl.appendChild(transWrap);
 
@@ -1293,7 +1496,7 @@ function buildControls(){
     const row=document.createElement('div'); row.className='row';
     const input=document.createElement('input'); input.type='range'; input.min=min; input.max=max; input.value=layer.params[key];
     const val=document.createElement('span'); val.className='val'; val.textContent=layer.params[key];
-    input.addEventListener('input', ()=>{ layer.params[key]=Number(input.value); val.textContent=input.value; render(); });
+    input.addEventListener('input', ()=>{ pushHistoryGuarded(); layer.params[key]=Number(input.value); val.textContent=input.value; render(); });
     row.appendChild(input); row.appendChild(val);
     wrap.appendChild(row);
     controlsEl.appendChild(wrap);
@@ -1304,7 +1507,7 @@ function buildControls(){
     const wrap=document.createElement('div'); wrap.className='field';
     wrap.innerHTML='<label>FLIP DIRECTION</label>';
     const flipBtn=document.createElement('button'); flipBtn.className='tbtn'+(layer.params.flip?' on':''); flipBtn.textContent=layer.params.flip?'FLIPPED':'DEFAULT';
-    flipBtn.addEventListener('click', ()=>{ layer.params.flip=!layer.params.flip; flipBtn.classList.toggle('on',layer.params.flip); flipBtn.textContent=layer.params.flip?'FLIPPED':'DEFAULT'; render(); });
+    flipBtn.addEventListener('click', ()=>{ pushHistory(); layer.params.flip=!layer.params.flip; flipBtn.classList.toggle('on',layer.params.flip); flipBtn.textContent=layer.params.flip?'FLIPPED':'DEFAULT'; render(); });
     wrap.appendChild(flipBtn);
     controlsEl.appendChild(wrap);
   }
@@ -1314,7 +1517,7 @@ function buildControls(){
     const wrap=document.createElement('div'); wrap.className='field';
     wrap.innerHTML='<label>HEX OVERLAY</label>';
     const hexBtn=document.createElement('button'); hexBtn.className='tbtn'+(layer.params.hexOverlay?' on':''); hexBtn.textContent=layer.params.hexOverlay?'ON':'OFF';
-    hexBtn.addEventListener('click', ()=>{ layer.params.hexOverlay=!layer.params.hexOverlay; hexBtn.classList.toggle('on',layer.params.hexOverlay); hexBtn.textContent=layer.params.hexOverlay?'ON':'OFF'; render(); });
+    hexBtn.addEventListener('click', ()=>{ pushHistory(); layer.params.hexOverlay=!layer.params.hexOverlay; hexBtn.classList.toggle('on',layer.params.hexOverlay); hexBtn.textContent=layer.params.hexOverlay?'ON':'OFF'; render(); });
     wrap.appendChild(hexBtn);
     controlsEl.appendChild(wrap);
   }
@@ -1344,17 +1547,17 @@ function buildZonesEditor(layer){
   layer.zones.forEach((z,i)=>{
     const row=document.createElement('div'); row.style.cssText='display:flex;gap:6px;align-items:center;margin-bottom:8px;';
     const nameInp=document.createElement('input'); nameInp.type='text'; nameInp.value=z.label; nameInp.style.cssText='width:76px;';
-    nameInp.addEventListener('input', ()=>{ z.label=nameInp.value; render(); });
+    nameInp.addEventListener('input', ()=>{ pushHistoryGuarded(); z.label=nameInp.value; render(); });
     const weightInp=document.createElement('input'); weightInp.type='range'; weightInp.min=5; weightInp.max=95; weightInp.value=z.weight; weightInp.style.flex='1';
     const wval=document.createElement('span'); wval.textContent=z.weight; wval.style.cssText='color:var(--cyan);font-size:10px;width:26px;';
-    weightInp.addEventListener('input', ()=>{ z.weight=Number(weightInp.value); wval.textContent=weightInp.value; render(); });
+    weightInp.addEventListener('input', ()=>{ pushHistoryGuarded(); z.weight=Number(weightInp.value); wval.textContent=weightInp.value; render(); });
     const delBtn=document.createElement('button'); delBtn.className='tbtn'; delBtn.textContent='✕'; delBtn.style.cssText='padding:6px 10px;min-height:auto;';
-    delBtn.addEventListener('click', ()=>{ if(layer.zones.length>1){ layer.zones.splice(i,1); buildControls(); render(); } });
+    delBtn.addEventListener('click', ()=>{ if(layer.zones.length>1){ pushHistory(); layer.zones.splice(i,1); buildControls(); render(); } });
     row.appendChild(nameInp); row.appendChild(weightInp); row.appendChild(wval); row.appendChild(delBtn);
     wrap.appendChild(row);
   });
   const addBtn=document.createElement('button'); addBtn.className='tbtn'; addBtn.textContent='+ ADD ZONE'; addBtn.style.width='100%';
-  addBtn.addEventListener('click', ()=>{ layer.zones.push({label:'Zone '+(layer.zones.length+1), weight:30}); buildControls(); render(); });
+  addBtn.addEventListener('click', ()=>{ pushHistory(); layer.zones.push({label:'Zone '+(layer.zones.length+1), weight:30}); buildControls(); render(); });
   wrap.appendChild(addBtn);
   controlsEl.appendChild(wrap);
 }
@@ -1367,17 +1570,17 @@ function buildGuidesEditor(layer){
     const axisSel=document.createElement('select'); axisSel.style.width='84px';
     axisSel.innerHTML='<option value="v">Vertical</option><option value="h">Horizontal</option>';
     axisSel.value=gd.axis;
-    axisSel.addEventListener('change', ()=>{ gd.axis=axisSel.value; render(); });
+    axisSel.addEventListener('change', ()=>{ pushHistory(); gd.axis=axisSel.value; render(); });
     const posInp=document.createElement('input'); posInp.type='range'; posInp.min=0; posInp.max=100; posInp.value=gd.pos; posInp.style.flex='1';
     const pval=document.createElement('span'); pval.textContent=gd.pos+'%'; pval.style.cssText='color:var(--cyan);font-size:10px;width:32px;';
-    posInp.addEventListener('input', ()=>{ gd.pos=Number(posInp.value); pval.textContent=posInp.value+'%'; render(); });
+    posInp.addEventListener('input', ()=>{ pushHistoryGuarded(); gd.pos=Number(posInp.value); pval.textContent=posInp.value+'%'; render(); });
     const delBtn=document.createElement('button'); delBtn.className='tbtn'; delBtn.textContent='✕'; delBtn.style.cssText='padding:6px 10px;min-height:auto;';
-    delBtn.addEventListener('click', ()=>{ layer.guides.splice(i,1); buildControls(); render(); });
+    delBtn.addEventListener('click', ()=>{ pushHistory(); layer.guides.splice(i,1); buildControls(); render(); });
     row.appendChild(axisSel); row.appendChild(posInp); row.appendChild(pval); row.appendChild(delBtn);
     wrap.appendChild(row);
   });
   const addBtn=document.createElement('button'); addBtn.className='tbtn'; addBtn.textContent='+ ADD GUIDE LINE'; addBtn.style.width='100%';
-  addBtn.addEventListener('click', ()=>{ layer.guides.push({axis:'v',pos:50}); buildControls(); render(); });
+  addBtn.addEventListener('click', ()=>{ pushHistory(); layer.guides.push({axis:'v',pos:50}); buildControls(); render(); });
   wrap.appendChild(addBtn);
   controlsEl.appendChild(wrap);
 }
@@ -1390,7 +1593,7 @@ function buildCustomLinesEditor(layer){
     const head=document.createElement('div'); head.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;';
     head.innerHTML=`<span style="font-size:10px;color:var(--text-dim);">LINE ${i+1}</span>`;
     const delBtn=document.createElement('button'); delBtn.className='tbtn'; delBtn.textContent='✕'; delBtn.style.cssText='padding:4px 8px;min-height:auto;';
-    delBtn.addEventListener('click', ()=>{ layer.customLines.splice(i,1); buildControls(); render(); });
+    delBtn.addEventListener('click', ()=>{ pushHistory(); layer.customLines.splice(i,1); buildControls(); render(); });
     head.appendChild(delBtn);
     box.appendChild(head);
     [['px','Position X',0,100],['py','Position Y',0,100],['angle','Angle',0,180],['length','Length',10,150]].forEach(([key,label,min,max])=>{
@@ -1398,14 +1601,14 @@ function buildCustomLinesEditor(layer){
       const l=document.createElement('span'); l.textContent=label; l.style.cssText='font-size:9px;color:var(--text-dim);width:56px;';
       const inp=document.createElement('input'); inp.type='range'; inp.min=min; inp.max=max; inp.value=cl[key];
       const val=document.createElement('span'); val.className='val'; val.textContent=cl[key];
-      inp.addEventListener('input', ()=>{ cl[key]=Number(inp.value); val.textContent=inp.value; render(); });
+      inp.addEventListener('input', ()=>{ pushHistoryGuarded(); cl[key]=Number(inp.value); val.textContent=inp.value; render(); });
       row.appendChild(l); row.appendChild(inp); row.appendChild(val);
       box.appendChild(row);
     });
     wrap.appendChild(box);
   });
   const addBtn=document.createElement('button'); addBtn.className='tbtn'; addBtn.textContent='+ ADD LINE'; addBtn.style.width='100%';
-  addBtn.addEventListener('click', ()=>{ layer.customLines.push({px:50,py:50,angle:0,length:90}); buildControls(); render(); });
+  addBtn.addEventListener('click', ()=>{ pushHistory(); layer.customLines.push({px:50,py:50,angle:0,length:90}); buildControls(); render(); });
   wrap.appendChild(addBtn);
   controlsEl.appendChild(wrap);
 }
@@ -1418,6 +1621,7 @@ function buildVpsEditor(layer){
   const countInp=document.createElement('input'); countInp.type='range'; countInp.min=1; countInp.max=6; countInp.value=layer.params.vps.length;
   const countVal=document.createElement('span'); countVal.className='val'; countVal.textContent=layer.params.vps.length;
   countInp.addEventListener('input', ()=>{
+    pushHistoryGuarded();
     const n=Number(countInp.value); countVal.textContent=n;
     const vps=layer.params.vps;
     while(vps.length<n) vps.push({x:20+Math.random()*60, y:20+Math.random()*60});
@@ -1435,7 +1639,7 @@ function buildVpsEditor(layer){
       const l=document.createElement('span'); l.textContent=label; l.style.cssText='font-size:9px;color:var(--text-dim);width:60px;';
       const inp=document.createElement('input'); inp.type='range'; inp.min=-50; inp.max=150; inp.value=vp[key];
       const val=document.createElement('span'); val.className='val'; val.textContent=Math.round(vp[key])+'%';
-      inp.addEventListener('input', ()=>{ vp[key]=Number(inp.value); val.textContent=inp.value+'%'; render(); });
+      inp.addEventListener('input', ()=>{ pushHistoryGuarded(); vp[key]=Number(inp.value); val.textContent=inp.value+'%'; render(); });
       row.appendChild(l); row.appendChild(inp); row.appendChild(val);
       box.appendChild(row);
     });
@@ -1447,7 +1651,7 @@ function buildVpsEditor(layer){
   const raysInner=document.createElement('div'); raysInner.className='row';
   const raysInp=document.createElement('input'); raysInp.type='range'; raysInp.min=4; raysInp.max=48; raysInp.value=layer.params.rays;
   const raysVal=document.createElement('span'); raysVal.className='val'; raysVal.textContent=layer.params.rays;
-  raysInp.addEventListener('input', ()=>{ layer.params.rays=Number(raysInp.value); raysVal.textContent=raysInp.value; render(); });
+  raysInp.addEventListener('input', ()=>{ pushHistoryGuarded(); layer.params.rays=Number(raysInp.value); raysVal.textContent=raysInp.value; render(); });
   raysInner.appendChild(raysInp); raysInner.appendChild(raysVal);
   raysRow.appendChild(raysInner);
   wrap.appendChild(raysRow);
@@ -1460,6 +1664,7 @@ function buildVpsEditor(layer){
    TOOLBAR EVENTS
    ============================================================ */
 document.getElementById('presetSel').addEventListener('change', e=>{
+  pushHistory();
   state.preset=e.target.value;
   document.getElementById('customDimGrp').style.display = state.preset==='custom' ? 'flex':'none';
   setCanvasSize(); state.objects=[]; render();
@@ -1532,6 +1737,7 @@ customUnitSel.addEventListener('change', ()=>{
 updatePxHint();
 
 document.getElementById('customApply').addEventListener('click', ()=>{
+  pushHistory();
   const {w:wPxRaw,h:hPxRaw} = currentCustomPx();
   const w=Math.max(50,Math.min(8000, Math.round(wPxRaw)||1200));
   const h=Math.max(50,Math.min(8000, Math.round(hPxRaw)||800));
@@ -1542,8 +1748,8 @@ document.getElementById('customApply').addEventListener('click', ()=>{
   setCanvasSize(); state.objects=[]; render();
 });
 document.getElementById('unitSel').addEventListener('change', e=>{ state.unit=e.target.value; });
-document.getElementById('zoomIn').addEventListener('click', ()=>{ state.zoom=Math.min(2,state.zoom+0.1); applyZoom(); });
-document.getElementById('zoomOut').addEventListener('click', ()=>{ state.zoom=Math.max(0.1,state.zoom-0.1); applyZoom(); });
+document.getElementById('zoomIn').addEventListener('click', ()=>{ state.zoom=Math.min(3,Math.round((state.zoom+0.1)*100)/100); applyZoom(); });
+document.getElementById('zoomOut').addEventListener('click', ()=>{ state.zoom=Math.max(0.1,Math.round((state.zoom-0.1)*100)/100); applyZoom(); });
 document.getElementById('zoomFit').addEventListener('click', fitZoom);
 
 const snapBtn=document.getElementById('snapBtn');
@@ -1561,9 +1767,28 @@ moveBtn.addEventListener('click', ()=>{
   canvas.style.cursor = state.moveMode ? 'move' : 'crosshair';
 });
 
-document.getElementById('addRect').addEventListener('click', ()=>addObject('rect'));
-document.getElementById('addText').addEventListener('click', ()=>addObject('text'));
-document.getElementById('clearObjs').addEventListener('click', ()=>{ state.objects=[]; state.selectedObjectId=null; render(); });
+const centerSnapBtn=document.getElementById('centerSnapBtn');
+state.centerSnap = true;
+centerSnapBtn.classList.add('on');
+centerSnapBtn.addEventListener('click', ()=>{
+  state.centerSnap=!state.centerSnap;
+  centerSnapBtn.textContent='CENTER SNAP: '+(state.centerSnap?'ON':'OFF');
+  centerSnapBtn.classList.toggle('on', state.centerSnap);
+});
+
+const overviewBtn=document.getElementById('overviewBtn');
+const overviewPanel=document.getElementById('overviewPanel');
+overviewBtn.classList.add('on');
+overviewBtn.addEventListener('click', ()=>{
+  state.showOverview = state.showOverview===false ? true : false;
+  overviewBtn.textContent='OVERVIEW: '+(state.showOverview===false ? 'OFF':'ON');
+  overviewBtn.classList.toggle('on', state.showOverview!==false);
+  overviewPanel.style.display = state.showOverview===false ? 'none' : 'block';
+});
+
+document.getElementById('addRect').addEventListener('click', ()=>{ pushHistory(); addObject('rect'); });
+document.getElementById('addText').addEventListener('click', ()=>{ pushHistory(); addObject('text'); });
+document.getElementById('clearObjs').addEventListener('click', ()=>{ pushHistory(); state.objects=[]; state.selectedObjectId=null; render(); });
 
 document.getElementById('themeBtn').addEventListener('click', ()=>{ setTheme(theme==='dark'?'light':'dark'); });
 
@@ -1661,22 +1886,26 @@ canvas.addEventListener('mousedown', e=>{
 
   const warpHit = hitWarpCorner(x,y);
   if(warpHit){
+    pushHistory();
     state.drag = {mode:'warp-corner', layer:warpHit.layer, index:warpHit.index};
     return;
   }
   const vpHit = hitVpHandle(x,y);
   if(vpHit){
+    pushHistory();
     state.drag = {mode:'vp', layer:vpHit.layer, index:vpHit.index};
     return;
   }
 
   const handleObj = hitHandle(x,y);
   if(handleObj){
+    pushHistory();
     state.drag = {mode:'resize', obj:handleObj, startX:x, startY:y, startW:handleObj.w, startH:handleObj.h};
     return;
   }
   const obj = hitObject(x,y);
   if(obj){
+    pushHistory();
     state.selectedObjectId = obj.id;
     state.drag = {mode:'move-object', obj, offX:x-obj.x, offY:y-obj.y};
     render();
@@ -1684,6 +1913,7 @@ canvas.addEventListener('mousedown', e=>{
   }
   state.selectedObjectId = null;
   if(state.moveMode && activeLayer()){
+    pushHistory();
     const al = activeLayer();
     state.drag = {mode:'move-layer', layer:al, startX:x, startY:y, startOffX:al.offsetX, startOffY:al.offsetY};
   }
@@ -1701,8 +1931,15 @@ canvas.addEventListener('mousemove', e=>{
     d.obj.w = snapValue(Math.max(20, d.startW+dx), 'x');
     d.obj.h = snapValue(Math.max(20, d.startH+dy), 'y');
   } else if(d.mode==='move-layer'){
-    d.layer.offsetX = d.startOffX + (x-d.startX);
-    d.layer.offsetY = d.startOffY + (y-d.startY);
+    let nx = d.startOffX + (x-d.startX);
+    let ny = d.startOffY + (y-d.startY);
+    if(state.centerSnap){
+      const threshold = 14/state.zoom;
+      if(Math.abs(nx)<threshold) nx=0;
+      if(Math.abs(ny)<threshold) ny=0;
+    }
+    d.layer.offsetX = nx;
+    d.layer.offsetY = ny;
   } else if(d.mode==='warp-corner'){
     d.layer.warpCorners[d.index] = {x, y};
   } else if(d.mode==='vp'){
@@ -1765,7 +2002,7 @@ document.getElementById('setupSave').addEventListener('click', ()=>{
 document.getElementById('setupLoad').addEventListener('click', ()=>{
   const name=document.getElementById('setupSel').value; if(!name) return;
   const map=loadSetupsMap();
-  if(map[name]){ applyProjectPayload(map[name]); setupHint.textContent=`Loaded "${name}".`; }
+  if(map[name]){ pushHistory(); applyProjectPayload(map[name]); setupHint.textContent=`Loaded "${name}".`; }
 });
 document.getElementById('setupRename').addEventListener('click', ()=>{
   const sel=document.getElementById('setupSel'); const oldName=sel.value; if(!oldName) return;
