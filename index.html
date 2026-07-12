@@ -259,9 +259,11 @@
         </div>
       </div>
       <div style="display:none; gap:8px; align-items:center; margin-top:6px;" id="refControlsRow">
+        <button class="tbtn" id="refMoveBtn" style="flex:1;">MOVE IMAGE</button>
         <button class="tbtn" id="refIncludeBtn" style="flex:1;">EXCLUDE FROM EXPORT</button>
         <button class="tbtn" id="refRemoveBtn">✕</button>
       </div>
+      <div class="hint" id="refMoveHint" style="display:none;">MOVE IMAGE is on — drag anywhere on the canvas to reposition the picture. Turn it off to interact with grids/objects again.</div>
       <div class="hint">Reference images are never included in PNG/PDF exports unless you turn that on above — the point is to trace against it, not bake it in.</div>
     </div>
   </div>
@@ -779,7 +781,7 @@ function createLayer(gridId){
     rotation:0,
     offsetX:0, offsetY:0,
     scaleX:1, scaleY:1,
-    warpEnabled:false, warpCorners:null,
+    warpEnabled:false, warpCorners:null, warpBounds:null,
     params: params,
     zones: def.defaultZones ? JSON.parse(JSON.stringify(def.defaultZones)) : undefined,
     guides: gridId==='manuscript' ? [] : undefined,
@@ -1022,6 +1024,11 @@ function drawAllLayers(targetCtx, w, h, opts){
    WARP — generic 4-corner bilinear distort. Applies to every
    grid type the same way, since it operates on the already-
    computed lines/rects/arcs rather than each grid's own math.
+   The 4 corner handles are placed at the layer's actual visible
+   CONTENT bounds (not the full canvas edges), so grids with
+   margins (Column, Modular, Manuscript, Box, Manga...) get handles
+   that sit right against their own guidelines instead of way out
+   at the canvas corners.
    ============================================================ */
 function bilinear(u,v,corners){
   const [c0,c1,c2,c3]=corners; // TL,TR,BR,BL
@@ -1029,9 +1036,28 @@ function bilinear(u,v,corners){
   const y=(1-u)*(1-v)*c0.y + u*(1-v)*c1.y + u*v*c2.y + (1-u)*v*c3.y;
   return {x,y};
 }
-function warpPt(pt,w,h,corners){ return bilinear(pt.x/w, pt.y/h, corners); }
+function warpPt(pt,bounds,corners){
+  const u=(pt.x-bounds.x)/bounds.w, v=(pt.y-bounds.y)/bounds.h;
+  return bilinear(u,v,corners);
+}
 
-function currentTransformCorners(layer,w,h){
+function computeLayerContentBounds(layer,w,h){
+  const g = computeGridForLayer(layer, w, h);
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  function consider(x,y){ if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+  (g.lines||[]).forEach(l=>{ consider(l.x1,l.y1); consider(l.x2,l.y2); });
+  (g.rects||[]).forEach(r=>{ consider(r.x,r.y); consider(r.x+r.w,r.y+r.h); });
+  (g.arcs||[]).forEach(a=>{ consider(a.cx-a.r,a.cy-a.r); consider(a.cx+a.r,a.cy+a.r); });
+  if(!isFinite(minX)) return {x:0,y:0,w:w,h:h};
+  // clamp so radiating grids (circular/axial/perspective) don't push handles absurdly far off-canvas
+  minX=Math.max(-w*0.15,minX); minY=Math.max(-h*0.15,minY);
+  maxX=Math.min(w*1.15,maxX); maxY=Math.min(h*1.15,maxY);
+  if(maxX-minX<10) maxX=minX+10;
+  if(maxY-minY<10) maxY=minY+10;
+  return {x:minX, y:minY, w:maxX-minX, h:maxY-minY};
+}
+
+function currentTransformCorners(layer,bounds,w,h){
   const rad=layer.rotation*Math.PI/180;
   const sx=layer.scaleX||1, sy=layer.scaleY||1;
   const cx=w/2+layer.offsetX, cy=h/2+layer.offsetY;
@@ -1041,10 +1067,13 @@ function currentTransformCorners(layer,w,h){
     const ry=dx*Math.sin(rad)+dy*Math.cos(rad);
     return {x:cx+rx, y:cy+ry};
   }
-  return [xf(0,0), xf(w,0), xf(w,h), xf(0,h)]; // TL,TR,BR,BL
+  return [xf(bounds.x,bounds.y), xf(bounds.x+bounds.w,bounds.y), xf(bounds.x+bounds.w,bounds.y+bounds.h), xf(bounds.x,bounds.y+bounds.h)]; // TL,TR,BR,BL
 }
 function enableWarp(layer){
-  layer.warpCorners = currentTransformCorners(layer, canvas.width, canvas.height);
+  const w=canvas.width, h=canvas.height;
+  const bounds = computeLayerContentBounds(layer, w, h);
+  layer.warpBounds = bounds;
+  layer.warpCorners = currentTransformCorners(layer, bounds, w, h);
   layer.warpEnabled = true;
 }
 function disableWarp(layer){ layer.warpEnabled=false; }
@@ -1053,13 +1082,14 @@ function drawWarpedLayerGeometry(targetCtx, layer, w, h, opts){
   opts = opts || {};
   const g = computeGridForLayer(layer, w, h);
   const corners = layer.warpCorners;
+  const bounds = layer.warpBounds || {x:0,y:0,w,h};
   const SEG=14;
   targetCtx.lineWidth=opts.lineWidth || 1;
   function segPoints(x1,y1,x2,y2){
     const pts=[];
     for(let i=0;i<=SEG;i++){
       const t=i/SEG;
-      pts.push(warpPt({x:x1+(x2-x1)*t, y:y1+(y2-y1)*t}, w,h, corners));
+      pts.push(warpPt({x:x1+(x2-x1)*t, y:y1+(y2-y1)*t}, bounds, corners));
     }
     return pts;
   }
@@ -1079,7 +1109,7 @@ function drawWarpedLayerGeometry(targetCtx, layer, w, h, opts){
     ];
     strokePts(pts);
     if(r.label && !opts.miniMode){
-      const lp = warpPt({x:r.x+6,y:r.y+14}, w,h, corners);
+      const lp = warpPt({x:r.x+6,y:r.y+14}, bounds, corners);
       drawLabel(targetCtx, r.label, lp.x, lp.y, roleColor(layer,r.color));
     }
   });
@@ -1096,7 +1126,7 @@ function drawWarpedLayerGeometry(targetCtx, layer, w, h, opts){
     const pts=[]; const STEPS=32;
     for(let i=0;i<=STEPS;i++){
       const ang=a.start+(a.end-a.start)*(i/STEPS);
-      pts.push(warpPt({x:a.cx+a.r*Math.cos(ang), y:a.cy+a.r*Math.sin(ang)}, w,h, corners));
+      pts.push(warpPt({x:a.cx+a.r*Math.cos(ang), y:a.cy+a.r*Math.sin(ang)}, bounds, corners));
     }
     strokePts(pts);
   });
@@ -1150,7 +1180,7 @@ function drawReferenceImage(targetCtx, w, h, opts){
   const iw=ref.img.width, ih=ref.img.height;
   const scale = Math.min(w/iw, h/ih);
   const dw=iw*scale, dh=ih*scale;
-  targetCtx.drawImage(ref.img, (w-dw)/2, (h-dh)/2, dw, dh);
+  targetCtx.drawImage(ref.img, (w-dw)/2+(ref.offsetX||0), (h-dh)/2+(ref.offsetY||0), dw, dh);
   targetCtx.restore();
 }
 
@@ -1454,7 +1484,7 @@ function resetLayer(layer){
   layer.customLines = layer.gridId==='customLines' ? JSON.parse(JSON.stringify(def.defaultLines||[])) : undefined;
   layer.rotation = 0; layer.offsetX = 0; layer.offsetY = 0;
   layer.scaleX = 1; layer.scaleY = 1;
-  layer.warpEnabled = false; layer.warpCorners = null;
+  layer.warpEnabled = false; layer.warpCorners = null; layer.warpBounds = null;
   layer.color = defaultColorFor();
   buildControls(); render();
 }
@@ -1813,7 +1843,12 @@ const moveBtn=document.getElementById('moveBtn');
 moveBtn.addEventListener('click', ()=>{
   state.moveMode=!state.moveMode;
   moveBtn.classList.toggle('on', state.moveMode);
-  canvas.style.cursor = state.moveMode ? 'move' : 'crosshair';
+  if(state.moveMode && state.moveImageMode){
+    state.moveImageMode=false;
+    refMoveBtn.classList.remove('on'); refMoveBtn.textContent='MOVE IMAGE';
+    refMoveHint.style.display='none';
+  }
+  canvas.style.cursor = (state.moveMode || state.moveImageMode) ? 'move' : 'crosshair';
 });
 
 const centerSnapBtn=document.getElementById('centerSnapBtn');
@@ -1851,6 +1886,8 @@ const refOpacity=document.getElementById('refOpacity');
 const refOpacityVal=document.getElementById('refOpacityVal');
 const refIncludeBtn=document.getElementById('refIncludeBtn');
 const refRemoveBtn=document.getElementById('refRemoveBtn');
+const refMoveBtn=document.getElementById('refMoveBtn');
+const refMoveHint=document.getElementById('refMoveHint');
 
 refImgInput.addEventListener('change', (e)=>{
   const file=e.target.files[0];
@@ -1859,7 +1896,7 @@ refImgInput.addEventListener('change', (e)=>{
   reader.onload=(ev)=>{
     const img=new Image();
     img.onload=()=>{
-      state.refImage = {img, opacity:0.6, includeInExport:false};
+      state.refImage = {img, opacity:0.6, includeInExport:false, offsetX:0, offsetY:0};
       refOpacityField.style.display='block';
       refControlsRow.style.display='flex';
       refIncludeBtn.textContent='EXCLUDE FROM EXPORT';
@@ -1885,7 +1922,24 @@ refRemoveBtn.addEventListener('click', ()=>{
   refImgInput.value='';
   refOpacityField.style.display='none';
   refControlsRow.style.display='none';
+  state.moveImageMode=false;
+  refMoveBtn.classList.remove('on'); refMoveBtn.textContent='MOVE IMAGE';
+  refMoveHint.style.display='none';
   render();
+});
+refMoveBtn.addEventListener('click', ()=>{
+  state.moveImageMode = !state.moveImageMode;
+  refMoveBtn.classList.toggle('on', state.moveImageMode);
+  refMoveBtn.textContent = state.moveImageMode ? 'MOVE IMAGE: ON' : 'MOVE IMAGE';
+  refMoveHint.style.display = state.moveImageMode ? 'block' : 'none';
+  if(state.moveImageMode){
+    // mutually exclusive with grid-move, to keep drag intent unambiguous
+    state.moveMode=false;
+    moveBtn.classList.remove('on');
+    canvas.style.cursor='move';
+  } else if(!state.moveMode){
+    canvas.style.cursor='crosshair';
+  }
 });
 
 
@@ -1933,6 +1987,13 @@ function hitVpHandle(x,y){
 canvas.addEventListener('mousedown', e=>{
   const {x,y}=toCanvasCoords(e);
 
+  if(state.moveImageMode && state.refImage){
+    pushHistory();
+    const ref = state.refImage;
+    state.drag = {mode:'move-image', ref, startX:x, startY:y, startOffX:ref.offsetX||0, startOffY:ref.offsetY||0};
+    return;
+  }
+
   const warpHit = hitWarpCorner(x,y);
   if(warpHit){
     pushHistory();
@@ -1979,6 +2040,9 @@ canvas.addEventListener('mousemove', e=>{
     const dx=x-d.startX, dy=y-d.startY;
     d.obj.w = snapValue(Math.max(20, d.startW+dx), 'x');
     d.obj.h = snapValue(Math.max(20, d.startH+dy), 'y');
+  } else if(d.mode==='move-image'){
+    d.ref.offsetX = d.startOffX + (x-d.startX);
+    d.ref.offsetY = d.startOffY + (y-d.startY);
   } else if(d.mode==='move-layer'){
     let nx = d.startOffX + (x-d.startX);
     let ny = d.startOffY + (y-d.startY);
@@ -2104,7 +2168,8 @@ document.getElementById('expPdf').addEventListener('click', ()=>{
   }
   function applyLayerTransform(pt, layer){
     if(layer.warpEnabled && layer.warpCorners){
-      return bilinear(pt.x/w, pt.y/h, layer.warpCorners);
+      const bounds = layer.warpBounds || {x:0,y:0,w,h};
+      return warpPt(pt, bounds, layer.warpCorners);
     }
     const rad = layer.rotation*Math.PI/180;
     const sx = layer.scaleX||1, sy = layer.scaleY||1;
