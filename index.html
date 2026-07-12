@@ -78,13 +78,14 @@
   button.tbtn:disabled:hover{border-color:var(--line); color:var(--text-dim);}
 
   #overviewPanel{
-    position:absolute; bottom:16px; right:16px; z-index:20;
-    background:rgba(10,15,22,.85); border:1px solid var(--line);
-    padding:6px; backdrop-filter:blur(4px);
+    margin:10px 14px 6px; padding:10px; border:1px solid var(--line); background:var(--panel-2);
   }
-  body.light #overviewPanel{ background:rgba(255,255,255,.9); }
-  .overview-label{font-size:9px; letter-spacing:2px; color:var(--text-dim); margin-bottom:4px;}
-  #overviewCanvas{display:block; background:#000; box-shadow:0 0 0 1px var(--line);}
+  .overview-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;}
+  .overview-label{font-size:10px; letter-spacing:2px; color:var(--text-dim);}
+  .overview-zoom{display:flex; align-items:center; gap:4px;}
+  .overview-zoom button.tbtn{padding:3px 9px; min-height:auto; font-size:11px;}
+  .overview-zoom span{font-size:10px; color:var(--cyan); min-width:32px; text-align:center;}
+  #overviewCanvas{display:block; background:#000; box-shadow:0 0 0 1px var(--line); width:100%; height:auto; cursor:pointer;}
 
 
   select, input[type=number], input[type=text]{
@@ -323,14 +324,22 @@
     <div class="canvas-wrap" id="stageWrap">
       <canvas id="stage" width="1440" height="900"></canvas>
     </div>
-    <div id="overviewPanel">
-      <div class="overview-label">OVERVIEW</div>
-      <canvas id="overviewCanvas" width="220" height="140"></canvas>
-    </div>
   </div>
 
   <!-- RIGHT PANEL: CONTROLS + SETUP + EXPORT -->
   <div class="panel right">
+    <div id="overviewPanel">
+      <div class="overview-head">
+        <span class="overview-label">OVERVIEW</span>
+        <div class="overview-zoom">
+          <button class="tbtn" id="ovZoomOut">−</button>
+          <span id="ovZoomLabel">100%</span>
+          <button class="tbtn" id="ovZoomIn">+</button>
+        </div>
+      </div>
+      <canvas id="overviewCanvas" width="264" height="168"></canvas>
+      <div class="hint">Shows all visible grid guidelines. Click to jump the main canvas there.</div>
+    </div>
     <div class="section-label">Parameters</div>
     <div class="ctrl-group" id="controls"></div>
 
@@ -819,25 +828,30 @@ function applyZoom(){
 }
 window.addEventListener('resize', ()=>{ fitZoom(); });
 
-/* Wheel zoom — keeps the point under the cursor visually stable while zooming */
+/* Wheel zoom — this is what makes the grid visually bigger/smaller inside
+   the canvas as you scroll, anchored so the point under your cursor stays
+   put (instead of the view jumping around while you zoom). */
 document.getElementById('stageWrap').addEventListener('wheel', (e)=>{
   e.preventDefault();
   const wrap = document.getElementById('stageWrap');
   const rect = wrap.getBoundingClientRect();
-  const cursorX = e.clientX - rect.left + wrap.scrollLeft;
-  const cursorY = e.clientY - rect.top + wrap.scrollTop;
-  const canvasX = cursorX - (wrap.clientWidth>canvas.clientWidth ? (wrap.clientWidth-canvas.clientWidth)/2 : 0);
-  const canvasY = cursorY - (wrap.clientHeight>canvas.clientHeight ? (wrap.clientHeight-canvas.clientHeight)/2 : 0);
-  const ratioX = canvasX / (canvas.width*state.zoom);
-  const ratioY = canvasY / (canvas.height*state.zoom);
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
 
-  const delta = e.deltaY < 0 ? 0.1 : -0.1;
-  const newZoom = Math.max(0.1, Math.min(3, Math.round((state.zoom+delta)*100)/100));
+  const oldZoom = state.zoom;
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+  const newZoom = Math.max(0.1, Math.min(3, Math.round(oldZoom*factor*100)/100));
+  if(newZoom===oldZoom) return;
+
+  const contentX = wrap.scrollLeft + mouseX;
+  const contentY = wrap.scrollTop + mouseY;
+  const scaleRatio = newZoom/oldZoom;
+
   state.zoom = newZoom;
   applyZoom();
 
-  wrap.scrollLeft = Math.max(0, ratioX*(canvas.width*state.zoom) - (e.clientX-rect.left));
-  wrap.scrollTop = Math.max(0, ratioY*(canvas.height*state.zoom) - (e.clientY-rect.top));
+  wrap.scrollLeft = contentX*scaleRatio - mouseX;
+  wrap.scrollTop = contentY*scaleRatio - mouseY;
 }, {passive:false});
 
 /* ============================================================
@@ -955,14 +969,15 @@ function drawLabel(targetCtx, text, x, y, fillColor, font){
   targetCtx.fillText(text, x, y);
 }
 
-function drawLayerGeometry(targetCtx, layer, w, h){
+function drawLayerGeometry(targetCtx, layer, w, h, opts){
+  opts = opts || {};
   const g = computeGridForLayer(layer, w, h);
-  targetCtx.lineWidth = 1;
+  targetCtx.lineWidth = opts.lineWidth || 1;
   (g.rects||[]).forEach(r=>{
     targetCtx.strokeStyle = roleColor(layer, r.color);
     targetCtx.globalAlpha = r.isFrame ? 0.9 : 0.85;
     targetCtx.strokeRect(r.x+0.5, r.y+0.5, r.w, r.h);
-    if(r.label){
+    if(r.label && !opts.miniMode){
       targetCtx.globalAlpha = 0.95;
       drawLabel(targetCtx, r.label, r.x+6, r.y+14, roleColor(layer, r.color));
     }
@@ -980,6 +995,27 @@ function drawLayerGeometry(targetCtx, layer, w, h){
     targetCtx.beginPath(); targetCtx.arc(a.cx,a.cy,a.r,a.start,a.end); targetCtx.stroke();
   });
   targetCtx.globalAlpha = 1;
+}
+
+/* Draws every visible layer with its own transform (rotation/offset/
+   scale, or warp) applied — shared by the main canvas render() and
+   the Overview panel, so the overview always shows real guidelines. */
+function drawAllLayers(targetCtx, w, h, opts){
+  opts = opts || {};
+  layers.forEach(layer=>{
+    if(!layer.visible) return;
+    if(layer.warpEnabled && layer.warpCorners){
+      drawWarpedLayerGeometry(targetCtx, layer, w, h, opts);
+    } else {
+      targetCtx.save();
+      targetCtx.translate(w/2+layer.offsetX, h/2+layer.offsetY);
+      targetCtx.rotate(layer.rotation*Math.PI/180);
+      targetCtx.scale(layer.scaleX||1, layer.scaleY||1);
+      targetCtx.translate(-w/2,-h/2);
+      drawLayerGeometry(targetCtx, layer, w, h, opts);
+      targetCtx.restore();
+    }
+  });
 }
 
 /* ============================================================
@@ -1013,11 +1049,12 @@ function enableWarp(layer){
 }
 function disableWarp(layer){ layer.warpEnabled=false; }
 
-function drawWarpedLayerGeometry(targetCtx, layer, w, h){
+function drawWarpedLayerGeometry(targetCtx, layer, w, h, opts){
+  opts = opts || {};
   const g = computeGridForLayer(layer, w, h);
   const corners = layer.warpCorners;
   const SEG=14;
-  targetCtx.lineWidth=1;
+  targetCtx.lineWidth=opts.lineWidth || 1;
   function segPoints(x1,y1,x2,y2){
     const pts=[];
     for(let i=0;i<=SEG;i++){
@@ -1041,7 +1078,7 @@ function drawWarpedLayerGeometry(targetCtx, layer, w, h){
       ...segPoints(r.x,r.y+r.h,r.x,r.y).slice(1),
     ];
     strokePts(pts);
-    if(r.label){
+    if(r.label && !opts.miniMode){
       const lp = warpPt({x:r.x+6,y:r.y+14}, w,h, corners);
       drawLabel(targetCtx, r.label, lp.x, lp.y, roleColor(layer,r.color));
     }
@@ -1132,20 +1169,7 @@ function render(targetCtx, opts){
 
   drawReferenceImage(targetCtx, w, h, opts);
 
-  layers.forEach(layer=>{
-    if(!layer.visible) return;
-    if(layer.warpEnabled && layer.warpCorners){
-      drawWarpedLayerGeometry(targetCtx, layer, w, h);
-    } else {
-      targetCtx.save();
-      targetCtx.translate(w/2+layer.offsetX, h/2+layer.offsetY);
-      targetCtx.rotate(layer.rotation*Math.PI/180);
-      targetCtx.scale(layer.scaleX||1, layer.scaleY||1);
-      targetCtx.translate(-w/2,-h/2);
-      drawLayerGeometry(targetCtx, layer, w, h);
-      targetCtx.restore();
-    }
-  });
+  drawAllLayers(targetCtx, w, h, {});
 
   drawObjects(targetCtx, opts);
 
@@ -1183,11 +1207,15 @@ function drawCorner(targetCtx,x,y,dx,dy){
 }
 
 /* ============================================================
-   OVERVIEW / MINIMAP PANEL — always shows the whole canvas,
-   deliberately WITHOUT grid lines so it stays readable at small
-   size; shows the reference image, test objects, and a yellow
-   box marking what part of the canvas the main view is showing.
+   OVERVIEW / MINIMAP PANEL — shows the whole canvas including
+   every visible grid's guidelines (reusing the exact same
+   drawAllLayers() the main canvas uses, just scaled down), plus
+   the reference image, test objects, and a yellow box marking
+   what part of the canvas the main view is currently showing.
+   Has its own independent zoom so you can look closer without
+   changing the main canvas view.
    ============================================================ */
+state.overviewZoom = 1;
 function drawOverview(){
   if(state.showOverview===false) return;
   const ov = document.getElementById('overviewCanvas');
@@ -1199,7 +1227,8 @@ function drawOverview(){
   octx.fillRect(0,0,ow,oh);
 
   const w=canvas.width, h=canvas.height;
-  const scale = Math.min(ow/w, oh/h);
+  const baseScale = Math.min(ow/w, oh/h);
+  const scale = baseScale * (state.overviewZoom||1);
   const dw=w*scale, dh=h*scale;
   const offX=(ow-dw)/2, offY=(oh-dh)/2;
 
@@ -1207,13 +1236,22 @@ function drawOverview(){
     const img=state.refImage.img;
     const iscale=Math.min(dw/img.width, dh/img.height);
     const iw=img.width*iscale, ih=img.height*iscale;
-    octx.globalAlpha=0.55;
+    octx.globalAlpha=0.5;
     octx.drawImage(img, offX+(dw-iw)/2, offY+(dh-ih)/2, iw, ih);
     octx.globalAlpha=1;
   }
 
+  octx.save();
+  octx.beginPath();
+  octx.rect(Math.max(0,offX), Math.max(0,offY), Math.min(ow,dw), Math.min(oh,dh));
+  octx.clip();
+  octx.translate(offX, offY);
+  octx.scale(scale, scale);
+  drawAllLayers(octx, w, h, {lineWidth: 1/scale, miniMode:true});
+  octx.restore();
+
   state.objects.forEach(o=>{
-    octx.fillStyle = o.type==='rect' ? 'rgba(255,212,0,.55)' : 'rgba(255,59,59,.55)';
+    octx.fillStyle = o.type==='rect' ? 'rgba(255,212,0,.6)' : 'rgba(255,59,59,.6)';
     octx.fillRect(offX+o.x*scale, offY+o.y*scale, Math.max(2,o.w*scale), Math.max(2,o.h*scale));
   });
 
@@ -1233,7 +1271,8 @@ document.getElementById('overviewCanvas').addEventListener('click', (e)=>{
   const rect=ov.getBoundingClientRect();
   const ow=ov.width, oh=ov.height;
   const w=canvas.width, h=canvas.height;
-  const scale=Math.min(ow/w, oh/h);
+  const baseScale=Math.min(ow/w, oh/h);
+  const scale=baseScale*(state.overviewZoom||1);
   const dw=w*scale, dh=h*scale;
   const offX=(ow-dw)/2, offY=(oh-dh)/2;
   const clickX=(e.clientX-rect.left)*(ow/rect.width), clickY=(e.clientY-rect.top)*(oh/rect.height);
@@ -1244,6 +1283,16 @@ document.getElementById('overviewCanvas').addEventListener('click', (e)=>{
   drawOverview();
 });
 document.getElementById('stageWrap').addEventListener('scroll', drawOverview);
+document.getElementById('ovZoomIn').addEventListener('click', ()=>{
+  state.overviewZoom = Math.min(4, Math.round((state.overviewZoom+0.25)*100)/100);
+  document.getElementById('ovZoomLabel').textContent = Math.round(state.overviewZoom*100)+'%';
+  drawOverview();
+});
+document.getElementById('ovZoomOut').addEventListener('click', ()=>{
+  state.overviewZoom = Math.max(0.5, Math.round((state.overviewZoom-0.25)*100)/100);
+  document.getElementById('ovZoomLabel').textContent = Math.round(state.overviewZoom*100)+'%';
+  drawOverview();
+});
 
 /* ============================================================
    SNAP LOGIC — snaps relative to the ACTIVE layer's actual grid
