@@ -257,13 +257,18 @@
           <input type="range" id="refOpacity" min="5" max="100" value="60">
           <span class="val" id="refOpacityVal">60%</span>
         </div>
+        <label style="margin-top:8px;">SIZE</label>
+        <div class="row">
+          <input type="range" id="refScale" min="10" max="400" value="100">
+          <span class="val" id="refScaleVal">100%</span>
+        </div>
       </div>
       <div style="display:none; gap:8px; align-items:center; margin-top:6px;" id="refControlsRow">
         <button class="tbtn" id="refMoveBtn" style="flex:1;">MOVE IMAGE</button>
         <button class="tbtn" id="refIncludeBtn" style="flex:1;">EXCLUDE FROM EXPORT</button>
         <button class="tbtn" id="refRemoveBtn">✕</button>
       </div>
-      <div class="hint" id="refMoveHint" style="display:none;">MOVE IMAGE is on — drag anywhere on the canvas to reposition the picture. Turn it off to interact with grids/objects again.</div>
+      <div class="hint" id="refMoveHint" style="display:none;">MOVE IMAGE is on — drag anywhere on the canvas to reposition the picture, or drag its bottom-right corner handle to resize. Turn it off to interact with grids/objects again.</div>
       <div class="hint">Reference images are never included in PNG/PDF exports unless you turn that on above — the point is to trace against it, not bake it in.</div>
     </div>
   </div>
@@ -1170,17 +1175,25 @@ function drawObjects(targetCtx, opts){
 /* ============================================================
    REFERENCE IMAGE UNDERLAY
    ============================================================ */
+function refImageBounds(w,h){
+  const ref = state.refImage;
+  if(!ref || !ref.img) return null;
+  const iw=ref.img.width, ih=ref.img.height;
+  const fitScale = Math.min(w/iw, h/ih);
+  const scale = (ref.scale||100)/100;
+  const dw=iw*fitScale*scale, dh=ih*fitScale*scale;
+  const x=(w-dw)/2+(ref.offsetX||0), y=(h-dh)/2+(ref.offsetY||0);
+  return {x,y,w:dw,h:dh};
+}
 function drawReferenceImage(targetCtx, w, h, opts){
   const ref = state.refImage;
   if(!ref || !ref.img) return;
   if(opts.transparent && !ref.includeInExport) return;
   if(opts.exportMode && !opts.transparent && !ref.includeInExport) return;
+  const b = refImageBounds(w,h);
   targetCtx.save();
   targetCtx.globalAlpha = ref.opacity;
-  const iw=ref.img.width, ih=ref.img.height;
-  const scale = Math.min(w/iw, h/ih);
-  const dw=iw*scale, dh=ih*scale;
-  targetCtx.drawImage(ref.img, (w-dw)/2+(ref.offsetX||0), (h-dh)/2+(ref.offsetY||0), dw, dh);
+  targetCtx.drawImage(ref.img, b.x, b.y, b.w, b.h);
   targetCtx.restore();
 }
 
@@ -1220,6 +1233,17 @@ function render(targetCtx, opts){
         targetCtx.beginPath(); targetCtx.arc(vx,vy,6,0,Math.PI*2); targetCtx.fill();
         targetCtx.strokeStyle='#000'; targetCtx.lineWidth=1.5; targetCtx.stroke();
       });
+    }
+    if(state.moveImageMode && state.refImage){
+      const b = refImageBounds(w,h);
+      if(b){
+        targetCtx.strokeStyle='rgba(0,229,255,.7)'; targetCtx.lineWidth=1.5; targetCtx.setLineDash([6,4]);
+        targetCtx.strokeRect(b.x,b.y,b.w,b.h);
+        targetCtx.setLineDash([]);
+        targetCtx.fillStyle='#00e5ff';
+        targetCtx.fillRect(b.x+b.w-8, b.y+b.h-8, 8, 8);
+        targetCtx.strokeStyle='#000'; targetCtx.lineWidth=1; targetCtx.strokeRect(b.x+b.w-8, b.y+b.h-8, 8, 8);
+      }
     }
   }
   if(targetCtx===ctx){ drawOverview(); }
@@ -1263,11 +1287,9 @@ function drawOverview(){
   const offX=(ow-dw)/2, offY=(oh-dh)/2;
 
   if(state.refImage && state.refImage.img){
-    const img=state.refImage.img;
-    const iscale=Math.min(dw/img.width, dh/img.height);
-    const iw=img.width*iscale, ih=img.height*iscale;
+    const b = refImageBounds(w,h);
     octx.globalAlpha=0.5;
-    octx.drawImage(img, offX+(dw-iw)/2, offY+(dh-ih)/2, iw, ih);
+    octx.drawImage(state.refImage.img, offX+b.x*scale, offY+b.y*scale, b.w*scale, b.h*scale);
     octx.globalAlpha=1;
   }
 
@@ -1884,6 +1906,8 @@ const refOpacityField=document.getElementById('refOpacityField');
 const refControlsRow=document.getElementById('refControlsRow');
 const refOpacity=document.getElementById('refOpacity');
 const refOpacityVal=document.getElementById('refOpacityVal');
+const refScale=document.getElementById('refScale');
+const refScaleVal=document.getElementById('refScaleVal');
 const refIncludeBtn=document.getElementById('refIncludeBtn');
 const refRemoveBtn=document.getElementById('refRemoveBtn');
 const refMoveBtn=document.getElementById('refMoveBtn');
@@ -1896,9 +1920,11 @@ refImgInput.addEventListener('change', (e)=>{
   reader.onload=(ev)=>{
     const img=new Image();
     img.onload=()=>{
-      state.refImage = {img, opacity:0.6, includeInExport:false, offsetX:0, offsetY:0};
+      state.refImage = {img, opacity:0.6, includeInExport:false, offsetX:0, offsetY:0, scale:100};
       refOpacityField.style.display='block';
       refControlsRow.style.display='flex';
+      refOpacity.value=60; refOpacityVal.textContent='60%';
+      refScale.value=100; refScaleVal.textContent='100%';
       refIncludeBtn.textContent='EXCLUDE FROM EXPORT';
       refIncludeBtn.classList.remove('on');
       render();
@@ -1910,6 +1936,10 @@ refImgInput.addEventListener('change', (e)=>{
 refOpacity.addEventListener('input', ()=>{
   refOpacityVal.textContent=refOpacity.value+'%';
   if(state.refImage){ state.refImage.opacity=Number(refOpacity.value)/100; render(); }
+});
+refScale.addEventListener('input', ()=>{
+  refScaleVal.textContent=refScale.value+'%';
+  if(state.refImage){ state.refImage.scale=Number(refScale.value); render(); }
 });
 refIncludeBtn.addEventListener('click', ()=>{
   if(!state.refImage) return;
@@ -1984,9 +2014,24 @@ function hitVpHandle(x,y){
   }
   return null;
 }
+function hitRefImageHandle(x,y){
+  if(!state.moveImageMode || !state.refImage) return null;
+  const b = refImageBounds(canvas.width, canvas.height);
+  if(!b) return null;
+  const hx=b.x+b.w, hy=b.y+b.h;
+  if(Math.abs(x-hx)<=10 && Math.abs(y-hy)<=10) return b;
+  return null;
+}
 canvas.addEventListener('mousedown', e=>{
   const {x,y}=toCanvasCoords(e);
 
+  const refHandle = hitRefImageHandle(x,y);
+  if(refHandle){
+    pushHistory();
+    const ref = state.refImage;
+    state.drag = {mode:'resize-image', ref, startX:x, startY:y, startBounds:refHandle, startScale:ref.scale||100};
+    return;
+  }
   if(state.moveImageMode && state.refImage){
     pushHistory();
     const ref = state.refImage;
@@ -2043,6 +2088,15 @@ canvas.addEventListener('mousemove', e=>{
   } else if(d.mode==='move-image'){
     d.ref.offsetX = d.startOffX + (x-d.startX);
     d.ref.offsetY = d.startOffY + (y-d.startY);
+  } else if(d.mode==='resize-image'){
+    const startCornerDist = Math.hypot(d.startBounds.w, d.startBounds.h);
+    const cx=d.startBounds.x, cy=d.startBounds.y;
+    const newDist = Math.hypot(x-cx, y-cy);
+    const factor = Math.max(0.1, newDist/Math.max(1,startCornerDist));
+    const newScale = Math.max(10, Math.min(400, Math.round(d.startScale*factor)));
+    d.ref.scale = newScale;
+    const refScaleEl=document.getElementById('refScale'), refScaleValEl=document.getElementById('refScaleVal');
+    if(refScaleEl){ refScaleEl.value=newScale; refScaleValEl.textContent=newScale+'%'; }
   } else if(d.mode==='move-layer'){
     let nx = d.startOffX + (x-d.startX);
     let ny = d.startOffY + (y-d.startY);
